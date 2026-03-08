@@ -1,0 +1,1802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Map Editor</title>
+<style>
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; height: 100vh; overflow: hidden; background: #f5f5f5; color: #333; }
+
+/* ── Sidebar ── */
+#sidebar { width: 340px; min-width: 340px; background: #fff; border-right: 1px solid #ddd; display: flex; flex-direction: column; overflow-y: auto; }
+.panel { padding: 16px; border-bottom: 1px solid #eee; }
+.panel h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: 10px; }
+.panel label { display: block; font-size: 13px; color: #555; margin-bottom: 4px; }
+.panel select, .panel input[type="text"], .panel input[type="file"] {
+  width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px;
+  font-size: 14px; margin-bottom: 10px; background: #fafafa; outline: none;
+}
+.panel select:focus, .panel input:focus { border-color: #4a90d9; }
+.panel button {
+  width: 100%; padding: 10px; border: none; border-radius: 6px; font-size: 14px;
+  cursor: pointer; font-weight: 500; transition: background 0.15s;
+}
+.btn-primary { background: #4a90d9; color: #fff; }
+.btn-primary:hover { background: #357abd; }
+.btn-primary:disabled { background: #b0c4de; cursor: not-allowed; }
+.btn-secondary { background: #eee; color: #555; margin-top: 6px; }
+.btn-secondary:hover { background: #ddd; }
+.btn-half { width: 48% !important; display: inline-block; }
+
+.checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
+.checkbox-row input[type="checkbox"] { width: auto; margin: 0; }
+
+/* Search results */
+#search-results { max-height: 200px; overflow-y: auto; }
+.search-result { padding: 8px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 13px; border-radius: 4px; }
+.search-result:hover { background: #f0f7ff; }
+.search-result .sr-name { font-weight: 500; }
+.search-result .sr-type { font-size: 11px; color: #999; }
+
+/* Notification */
+#notification { position: fixed; top: 16px; right: 16px; padding: 12px 20px; border-radius: 8px; font-size: 14px; z-index: 100; display: none; max-width: 400px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+#notification.success { background: #d4edda; color: #155724; display: block; }
+#notification.error { background: #f8d7da; color: #721c24; display: block; }
+
+/* ── Map Area ── */
+#map-container { flex: 1; position: relative; background: #f9f9f9; overflow: hidden; }
+#map-canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+#map-canvas.dragging { cursor: grabbing; }
+
+#tooltip {
+  position: absolute; pointer-events: none; display: none;
+  background: rgba(0,0,0,0.8); color: #fff; padding: 8px 12px; border-radius: 6px;
+  font-size: 12px; white-space: nowrap; z-index: 10;
+}
+
+#empty-state {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  text-align: center; color: #aaa;
+}
+#empty-state h2 { font-size: 20px; font-weight: 400; margin-bottom: 8px; }
+#empty-state p { font-size: 14px; }
+
+/* Legend */
+#legend {
+  position: absolute; bottom: 16px; right: 16px; background: rgba(255,255,255,0.95);
+  padding: 12px 16px; border-radius: 8px; font-size: 11px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1); display: none;
+}
+#legend.visible { display: block; }
+.legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.legend-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #ccc; }
+
+/* Modal */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 200;
+  background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  background: #fff; border-radius: 12px; padding: 28px; width: 400px; max-width: 90vw;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2);
+}
+.modal h2 { font-size: 18px; margin-bottom: 18px; font-weight: 600; }
+.modal label { display: block; font-size: 13px; color: #555; margin-bottom: 4px; }
+.modal input, .modal select {
+  width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px;
+  font-size: 14px; margin-bottom: 12px; outline: none;
+}
+.modal input:focus, .modal select:focus { border-color: #4a90d9; }
+.modal-buttons { display: flex; gap: 10px; margin-top: 8px; }
+.modal-buttons button { flex: 1; padding: 10px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; font-weight: 500; }
+
+/* Tool bar */
+.tool-bar { display: flex; gap: 6px; margin-bottom: 12px; }
+.tool-bar button {
+  flex: 1; padding: 8px 4px; font-size: 12px; border: 2px solid #ddd; border-radius: 6px;
+  background: #fafafa; cursor: pointer; font-weight: 500; color: #555; width: auto;
+}
+.tool-bar button:hover { border-color: #aaa; }
+.tool-bar button.active { border-color: #4a90d9; background: #eef4fc; color: #4a90d9; }
+.tool-hint { font-size: 12px; color: #888; margin-top: 4px; margin-bottom: 8px; line-height: 1.4; }
+.size-row { display: flex; gap: 8px; }
+.size-row input {
+  width: 50%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px;
+  font-size: 14px; margin-bottom: 10px; outline: none;
+}
+.size-row input:focus { border-color: #4a90d9; }
+
+/* Canvas crosshair mode */
+#map-canvas.crosshair { cursor: crosshair; }
+
+/* Connect highlight */
+.connect-from-badge { display: inline-block; background: #34c759; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-top: 4px; }
+
+/* Context menu */
+#context-menu {
+  position: absolute; display: none; z-index: 50;
+  background: #fff; border-radius: 8px; padding: 4px 0;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.18); min-width: 150px;
+}
+#context-menu .ctx-item {
+  padding: 8px 16px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 8px;
+}
+#context-menu .ctx-item:hover { background: #f0f7ff; }
+#context-menu .ctx-item.danger { color: #d9534f; }
+#context-menu .ctx-item.danger:hover { background: #fdf0f0; }
+#context-menu .ctx-sep { height: 1px; background: #eee; margin: 4px 0; }
+
+/* Info modal extras */
+.info-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; margin-bottom: 12px; }
+.info-grid .lbl { color: #888; }
+.info-grid .val { font-weight: 500; }
+.info-grid input.val-input { font-size: 13px; padding: 4px 6px; margin-bottom: 0; width: 100%; }
+.conn-list { max-height: 180px; overflow-y: auto; font-size: 13px; }
+.conn-item { padding: 4px 0; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 6px; }
+.conn-dir { font-size: 16px; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ── -->
+<div id="sidebar">
+  <!-- Map Selection -->
+  <div class="panel">
+    <h3>Map</h3>
+    <label for="campus-select">Campus</label>
+    <select id="campus-select"><option value="">Select campus...</option></select>
+    <label for="building-select">Building</label>
+    <select id="building-select" disabled><option value="">Select building...</option></select>
+    <label for="floor-select">Floor</label>
+    <select id="floor-select" disabled><option value="">Select floor...</option></select>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button class="btn-secondary btn-half" id="add-building-btn" disabled>+ Building</button>
+      <button class="btn-secondary btn-half" id="add-floor-btn" disabled>+ Floor</button>
+    </div>
+    <button class="btn-primary" id="new-map-btn">+ New Map</button>
+    <button class="btn-primary" id="export-btn" disabled style="margin-top:6px">Export JSON</button>
+  </div>
+
+  <!-- Search -->
+  <div class="panel">
+    <h3>Search</h3>
+    <input type="text" id="search-input" placeholder="Search spaces..." disabled>
+    <div id="search-results"></div>
+  </div>
+
+  <!-- Edit Tools -->
+  <div class="panel" id="tools-panel" style="display:none">
+    <h3>Edit Tools</h3>
+    <div class="tool-bar">
+      <button id="tool-select" class="active" data-mode="select">Select</button>
+      <button id="tool-add-space" data-mode="addSpace">+ Space</button>
+      <button id="tool-connect" data-mode="connect">Connect</button>
+    </div>
+    <!-- Add Space form -->
+    <div id="add-space-form" style="display:none">
+      <label for="new-space-name">Name</label>
+      <input type="text" id="new-space-name" placeholder="Room 101">
+      <label for="new-space-type">Type</label>
+      <select id="new-space-type">
+        <optgroup label="Rooms">
+          <option value="ROOM_GENERIC">Room (generic)</option>
+          <option value="ROOM_OFFICE">Office</option>
+          <option value="ROOM_CLASSROOM">Classroom</option>
+          <option value="ROOM_LECTURE_HALL">Lecture Hall</option>
+          <option value="ROOM_LAB">Lab</option>
+          <option value="ROOM_MEETING">Meeting Room</option>
+          <option value="ROOM_STORAGE">Storage</option>
+          <option value="ROOM_UTILITY">Utility</option>
+          <option value="RESTROOM">Restroom</option>
+          <option value="RESTROOM_ACCESSIBLE">Restroom (accessible)</option>
+        </optgroup>
+        <optgroup label="Circulation">
+          <option value="CORRIDOR">Corridor</option>
+          <option value="CORRIDOR_SEGMENT">Corridor Segment</option>
+          <option value="LOBBY">Lobby</option>
+          <option value="WAITING_AREA">Waiting Area</option>
+          <option value="RECEPTION">Reception</option>
+        </optgroup>
+        <optgroup label="Entrances">
+          <option value="ENTRANCE">Entrance</option>
+          <option value="ENTRANCE_SECONDARY">Secondary Entrance</option>
+          <option value="EXIT_EMERGENCY">Emergency Exit</option>
+        </optgroup>
+        <optgroup label="Vertical">
+          <option value="STAIRCASE">Staircase</option>
+          <option value="STAIRCASE_LANDING">Staircase Landing</option>
+          <option value="ELEVATOR">Elevator</option>
+          <option value="ELEVATOR_LOBBY">Elevator Lobby</option>
+          <option value="ESCALATOR">Escalator</option>
+          <option value="RAMP">Ramp</option>
+        </optgroup>
+        <optgroup label="Outdoor">
+          <option value="OUTDOOR_PATH">Outdoor Path</option>
+          <option value="OUTDOOR_PLAZA">Outdoor Plaza</option>
+          <option value="OUTDOOR_COURTYARD">Courtyard</option>
+          <option value="PARKING">Parking</option>
+        </optgroup>
+        <optgroup label="Amenities">
+          <option value="CAFETERIA">Cafeteria</option>
+          <option value="CAFE">Cafe</option>
+          <option value="LIBRARY">Library</option>
+          <option value="GYM">Gym</option>
+          <option value="AUDITORIUM">Auditorium</option>
+          <option value="SHOP">Shop</option>
+        </optgroup>
+      </select>
+      <label>Size (meters)</label>
+      <div class="size-row">
+        <input type="number" id="new-space-w" value="4" min="0.5" step="0.5" placeholder="Width">
+        <input type="number" id="new-space-h" value="3" min="0.5" step="0.5" placeholder="Height">
+      </div>
+      <p class="tool-hint">Click on the map to place the space at that location.</p>
+    </div>
+    <!-- Connect form -->
+    <div id="connect-form" style="display:none">
+      <label for="new-conn-type">Connection Type</label>
+      <select id="new-conn-type">
+        <option value="DOORWAY">Doorway</option>
+        <option value="WALKWAY">Walkway</option>
+        <option value="STAIRCASE_UP">Staircase Up</option>
+        <option value="STAIRCASE_DOWN">Staircase Down</option>
+        <option value="ELEVATOR_UP">Elevator Up</option>
+        <option value="ELEVATOR_DOWN">Elevator Down</option>
+        <option value="RAMP_UP">Ramp Up</option>
+        <option value="RAMP_DOWN">Ramp Down</option>
+        <option value="OUTDOOR_PATH">Outdoor Path</option>
+        <option value="BRIDGE">Bridge</option>
+        <option value="TUNNEL">Tunnel</option>
+      </select>
+      <div class="checkbox-row">
+        <input type="checkbox" id="new-conn-bidir" checked>
+        <label for="new-conn-bidir">Bidirectional</label>
+      </div>
+      <div class="checkbox-row">
+        <input type="checkbox" id="new-conn-accessible" checked>
+        <label for="new-conn-accessible">Accessible</label>
+      </div>
+      <p class="tool-hint" id="connect-status">Click the first space (start), then click the second space (end).</p>
+    </div>
+  </div>
+
+  <!-- Import -->
+  <div class="panel">
+    <h3>Import Map</h3>
+    <input type="file" id="import-file" accept=".json">
+    <button class="btn-primary" id="import-btn" disabled>Import</button>
+  </div>
+</div>
+
+<!-- ── New Map Modal ── -->
+<div id="modal-overlay" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h2>Create New Map</h2>
+    <label for="new-campus-name">Campus Name</label>
+    <input type="text" id="new-campus-name" placeholder="e.g. Aalborg University">
+    <label for="new-building-name">Building Name</label>
+    <input type="text" id="new-building-name" placeholder="e.g. Main Building">
+    <label for="new-floor-name">First Floor Name</label>
+    <input type="text" id="new-floor-name" value="Ground Floor">
+    <label for="new-floor-index">Floor Index</label>
+    <input type="number" id="new-floor-index" value="0" style="width:80px">
+    <div class="modal-buttons">
+      <button class="btn-secondary" id="modal-cancel">Cancel</button>
+      <button class="btn-primary" id="modal-create">Create Map</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Add Building Modal ── -->
+<div id="building-modal-overlay" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h2>Add Building</h2>
+    <label for="modal-building-name">Building Name</label>
+    <input type="text" id="modal-building-name" placeholder="e.g. Science Building">
+    <div class="modal-buttons">
+      <button class="btn-secondary" id="building-modal-cancel">Cancel</button>
+      <button class="btn-primary" id="building-modal-create">Create Building</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Add Floor Modal ── -->
+<div id="floor-modal-overlay" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h2>Add Floor</h2>
+    <label for="modal-floor-name">Floor Name</label>
+    <input type="text" id="modal-floor-name" placeholder="e.g. First Floor">
+    <label for="modal-floor-index">Floor Index</label>
+    <input type="number" id="modal-floor-index" value="0" style="width:80px">
+    <div class="modal-buttons">
+      <button class="btn-secondary" id="floor-modal-cancel">Cancel</button>
+      <button class="btn-primary" id="floor-modal-create">Create Floor</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Map ── -->
+<div id="map-container">
+  <canvas id="map-canvas"></canvas>
+  <div id="tooltip"></div>
+  <div id="empty-state">
+    <h2 id="empty-title">No floor selected</h2>
+    <p id="empty-msg">Click <strong>+ New Map</strong> to create a map from scratch,<br>or import a map JSON file to get started.</p>
+  </div>
+  <div id="legend">
+    <div class="legend-item"><span class="legend-swatch" style="background:#B3D9FF"></span> Rooms</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#E0E0E0"></span> Corridors</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#90EE90"></span> Entrances</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#FFD699"></span> Stairs / Elevators</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#FFB3D9"></span> Restrooms</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#FFEB99"></span> Amenities</div>
+    <div class="legend-item"><span class="legend-swatch" style="background:#C8F0C8"></span> Outdoor</div>
+  </div>
+  <div id="context-menu">
+    <div class="ctx-item" id="ctx-info">&#9432; Info</div>
+    <div class="ctx-item" id="ctx-move">&#9994; Move</div>
+    <div class="ctx-item" id="ctx-duplicate">&#10064; Duplicate</div>
+    <div class="ctx-sep"></div>
+    <div class="ctx-item danger" id="ctx-delete">&#10006; Delete</div>
+  </div>
+</div>
+
+<!-- Info Modal -->
+<div id="info-overlay" class="modal-overlay" style="display:none">
+  <div class="modal" style="width:440px">
+    <h2 id="info-title">Space Info</h2>
+    <div class="info-grid" id="info-grid"></div>
+    <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px">Connections</h3>
+    <div class="conn-list" id="info-connections"></div>
+    <div class="modal-buttons" style="margin-top:14px">
+      <button class="btn-primary" id="info-save">Save</button>
+      <button class="btn-secondary" id="info-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="notification"></div>
+
+<script>
+/* ═══════════════════════════════════════════════
+   Configuration & State
+   ═══════════════════════════════════════════════ */
+const API = '/api/v1';
+
+const state = {
+  campuses: [],
+  buildings: [],
+  floors: [],
+  spaces: [],
+  connections: [],
+  selectedCampusId: null,
+  selectedBuildingId: null,
+  selectedFloorId: null,
+  currentFloorIndex: null,
+  currentBuildingId: null,
+  hoveredSpace: null,
+  // Edit mode
+  mode: 'select',      // 'select' | 'addSpace' | 'connect' | 'moveSpace'
+  connectFrom: null,
+  // Move mode
+  moveSpace: null,
+  moveOrigPoly: null,
+  moveOrigCentroid: null,
+  // Context menu
+  contextMenu: null,
+  // Snap indicators
+  snapLines: [],
+  // Canvas transform
+  pan: { x: 0, y: 0 },
+  zoom: 1,
+  baseScale: 1,
+  bounds: null,
+  isDragging: false,
+  dragStart: { x: 0, y: 0 },
+  panStart: { x: 0, y: 0 },
+  // Info modal editing
+  _editingSpace: null,
+};
+
+/* ═══════════════════════════════════════════════
+   Space Type Colors
+   ═══════════════════════════════════════════════ */
+const COLORS = {
+  ROOM_GENERIC:'#B3D9FF', ROOM_OFFICE:'#A8CCF0', ROOM_CLASSROOM:'#B3D9FF',
+  ROOM_LECTURE_HALL:'#9EC5E8', ROOM_LAB:'#8BB8E0', ROOM_MEETING:'#B3D9FF',
+  ROOM_STORAGE:'#C8DFF5', ROOM_UTILITY:'#C8DFF5',
+  CORRIDOR:'#E0E0E0', CORRIDOR_SEGMENT:'#E0E0E0',
+  LOBBY:'#D8D8D8', WAITING_AREA:'#D8D8D8', RECEPTION:'#D8D8D8',
+  ENTRANCE:'#90EE90', ENTRANCE_SECONDARY:'#A8F0A8', EXIT_EMERGENCY:'#FFB3B3',
+  STAIRCASE:'#FFD699', STAIRCASE_LANDING:'#FFD699',
+  ELEVATOR:'#FFCC80', ELEVATOR_LOBBY:'#FFCC80',
+  ESCALATOR:'#FFD699', RAMP:'#FFD699',
+  BRIDGE:'#FFD699', TUNNEL:'#D0D0D0', COVERED_WALKWAY:'#D8E8D8',
+  OUTDOOR_PATH:'#C8F0C8', OUTDOOR_PLAZA:'#C8F0C8',
+  OUTDOOR_COURTYARD:'#C8F0C8', OUTDOOR_STAIRS:'#C8F0C8', PARKING:'#D0E8D0',
+  RESTROOM:'#FFB3D9', RESTROOM_ACCESSIBLE:'#FFB3D9',
+  CAFETERIA:'#FFEB99', CAFE:'#FFEB99', LIBRARY:'#FFEB99',
+  GYM:'#FFEB99', AUDITORIUM:'#FFEB99', SHOP:'#FFEB99',
+  INACCESSIBLE:'#808080', UNKNOWN:'#F0F0F0',
+};
+
+/* ═══════════════════════════════════════════════
+   DOM References
+   ═══════════════════════════════════════════════ */
+const $ = id => document.getElementById(id);
+const canvas = $('map-canvas');
+const ctx = canvas.getContext('2d');
+const tooltip = $('tooltip');
+const emptyState = $('empty-state');
+const legend = $('legend');
+
+/* ═══════════════════════════════════════════════
+   API Helpers
+   ═══════════════════════════════════════════════ */
+async function api(path, opts = {}) {
+  try {
+    const res = await fetch(API + path, opts);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${res.status}`);
+    }
+    if (res.status === 204) return null;
+    return await res.json();
+  } catch (e) {
+    notify(e.message, 'error');
+    throw e;
+  }
+}
+
+function notify(msg, type = 'success') {
+  const el = $('notification');
+  el.textContent = msg;
+  el.className = type;
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => { el.className = ''; el.style.display = 'none'; }, 4000);
+}
+
+/* ═══════════════════════════════════════════════
+   Coordinate Transform
+   ═══════════════════════════════════════════════ */
+function computeBounds(spaces) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of spaces) {
+    if (!s.polygon) continue;
+    for (const [x, y] of s.polygon) {
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+  }
+  if (minX === Infinity) return null;
+  return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
+}
+
+function fitToCanvas() {
+  let b = computeBounds(state.spaces);
+  if (!b || b.width === 0 || b.height === 0) {
+    b = { minX: 0, minY: 0, maxX: 50, maxY: 50, width: 50, height: 50 };
+  }
+  state.bounds = b;
+  const pad = 40;
+  const cw = canvas.width - pad * 2;
+  const ch = canvas.height - pad * 2;
+  state.baseScale = Math.min(cw / b.width, ch / b.height);
+  state.zoom = 1;
+  const scaledW = b.width * state.baseScale;
+  const scaledH = b.height * state.baseScale;
+  state.pan.x = (canvas.width - scaledW) / 2;
+  state.pan.y = (canvas.height - scaledH) / 2;
+}
+
+function worldToCanvas(wx, wy) {
+  const b = state.bounds;
+  if (!b) return [0, 0];
+  const s = state.baseScale * state.zoom;
+  const cx = (wx - b.minX) * s + state.pan.x;
+  const cy = (b.maxY - wy) * s + state.pan.y;
+  return [cx, cy];
+}
+
+function canvasToWorld(cx, cy) {
+  const b = state.bounds;
+  if (!b) return [0, 0];
+  const s = state.baseScale * state.zoom;
+  const wx = (cx - state.pan.x) / s + b.minX;
+  const wy = b.maxY - (cy - state.pan.y) / s;
+  return [wx, wy];
+}
+
+/* ═══════════════════════════════════════════════
+   Snapping
+   ═══════════════════════════════════════════════ */
+function gridSnap(value, step = 1) {
+  return Math.round(value / step) * step;
+}
+
+function getSpaceBBox(space) {
+  if (!space.polygon || space.polygon.length < 3) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of space.polygon) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function edgeSnap(wx, wy, halfW, halfH, excludeId) {
+  const THRESH = 1.5;
+  let snapX = null, snapY = null;
+  const myLeft = wx - halfW, myRight = wx + halfW;
+  const myBot = wy - halfH, myTop = wy + halfH;
+  let bestDx = THRESH, bestDy = THRESH;
+
+  for (const s of state.spaces) {
+    if (s.id === excludeId) continue;
+    const bb = getSpaceBBox(s);
+    if (!bb) continue;
+    const overlapY = myTop > bb.minY && myBot < bb.maxY;
+    const overlapX = myRight > bb.minX && myLeft < bb.maxX;
+
+    if (overlapY) {
+      const d1 = Math.abs(myRight - bb.minX);
+      if (d1 < bestDx) { bestDx = d1; snapX = bb.minX - halfW; }
+      const d2 = Math.abs(myLeft - bb.maxX);
+      if (d2 < bestDx) { bestDx = d2; snapX = bb.maxX + halfW; }
+      const d3 = Math.abs(myRight - bb.maxX);
+      if (d3 < bestDx) { bestDx = d3; snapX = bb.maxX - halfW; }
+      const d4 = Math.abs(myLeft - bb.minX);
+      if (d4 < bestDx) { bestDx = d4; snapX = bb.minX + halfW; }
+    }
+    if (overlapX) {
+      const d5 = Math.abs(myTop - bb.minY);
+      if (d5 < bestDy) { bestDy = d5; snapY = bb.minY - halfH; }
+      const d6 = Math.abs(myBot - bb.maxY);
+      if (d6 < bestDy) { bestDy = d6; snapY = bb.maxY + halfH; }
+      const d7 = Math.abs(myTop - bb.maxY);
+      if (d7 < bestDy) { bestDy = d7; snapY = bb.maxY - halfH; }
+      const d8 = Math.abs(myBot - bb.minY);
+      if (d8 < bestDy) { bestDy = d8; snapY = bb.minY + halfH; }
+    }
+  }
+  return { snapX, snapY };
+}
+
+function applySnap(wx, wy, halfW, halfH, excludeId) {
+  let sx = gridSnap(wx), sy = gridSnap(wy);
+  const edge = edgeSnap(sx, sy, halfW, halfH, excludeId);
+  const lines = [];
+  if (edge.snapX !== null) {
+    sx = edge.snapX;
+    lines.push({ axis: 'x', value: sx - halfW }, { axis: 'x', value: sx + halfW });
+  }
+  if (edge.snapY !== null) {
+    sy = edge.snapY;
+    lines.push({ axis: 'y', value: sy - halfH }, { axis: 'y', value: sy + halfH });
+  }
+  state.snapLines = lines;
+  return [sx, sy];
+}
+
+/* ═══════════════════════════════════════════════
+   Canvas Rendering
+   ═══════════════════════════════════════════════ */
+function resizeCanvas() {
+  const container = $('map-container');
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = container.clientWidth * dpr;
+  canvas.height = container.clientHeight * dpr;
+  canvas.style.width = container.clientWidth + 'px';
+  canvas.style.height = container.clientHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function render() {
+  const w = canvas.width / (window.devicePixelRatio || 1);
+  const h = canvas.height / (window.devicePixelRatio || 1);
+  ctx.clearRect(0, 0, w, h);
+
+  if (!state.bounds) return;
+
+  const effScale = state.baseScale * state.zoom;
+  const showLabels = effScale > 2;
+
+  // Draw infinite grid based on viewport
+  if (state.selectedFloorId) {
+    ctx.save();
+    ctx.strokeStyle = '#e8e8e8';
+    ctx.lineWidth = 0.5;
+    ctx.font = '9px sans-serif';
+    ctx.fillStyle = '#ccc';
+    const gridStep = 5;
+    const [vMinX, vMaxY] = canvasToWorld(0, 0);
+    const [vMaxX, vMinY] = canvasToWorld(w, h);
+    const startX = Math.floor(vMinX / gridStep) * gridStep;
+    const startY = Math.floor(vMinY / gridStep) * gridStep;
+    for (let x = startX; x <= vMaxX + gridStep; x += gridStep) {
+      const [cx1] = worldToCanvas(x, vMinY);
+      const [cx2] = worldToCanvas(x, vMaxY);
+      ctx.beginPath(); ctx.moveTo(cx1, 0); ctx.lineTo(cx2, h); ctx.stroke();
+      if (effScale > 1.5) ctx.fillText(`${x}m`, cx1 + 2, h - 4);
+    }
+    for (let y = startY; y <= vMaxY + gridStep; y += gridStep) {
+      const [, cy1] = worldToCanvas(vMinX, y);
+      const [, cy2] = worldToCanvas(vMaxX, y);
+      ctx.beginPath(); ctx.moveTo(0, cy1); ctx.lineTo(w, cy2); ctx.stroke();
+      if (effScale > 1.5) ctx.fillText(`${y}m`, 4, cy1 - 2);
+    }
+    ctx.restore();
+  }
+
+  // Draw spaces
+  for (const space of state.spaces) {
+    if (!space.polygon || space.polygon.length < 3) continue;
+
+    const isHovered = state.hoveredSpace && state.hoveredSpace.id === space.id;
+    const isConnectFrom = state.mode === 'connect' && state.connectFrom && state.connectFrom.id === space.id;
+
+    let fill = COLORS[space.space_type] || '#F0F0F0';
+    if (isHovered) fill = blendColor(fill, '#000000', 0.1);
+
+    drawPolygon(space.polygon, fill, '#999', 0.5);
+
+    if (isConnectFrom) drawPolygon(space.polygon, null, '#ff9500', 3);
+
+    // Labels
+    if (showLabels && space.centroid_x != null && space.centroid_y != null) {
+      const [lx, ly] = worldToCanvas(space.centroid_x, space.centroid_y);
+      ctx.save();
+      const fontSize = Math.min(14, Math.max(9, effScale * 0.8));
+      ctx.font = `${fontSize}px -apple-system, sans-serif`;
+      ctx.fillStyle = '#333';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const name = space.display_name || '';
+      const maxW = effScale * 3;
+      ctx.fillText(name.length > 20 ? name.slice(0, 18) + '..' : name, lx, ly, maxW);
+      ctx.restore();
+    }
+  }
+
+  // Draw connection arrows
+  for (const conn of state.connections) {
+    if (conn.from_cx == null || conn.from_cy == null || conn.to_cx == null || conn.to_cy == null) continue;
+    const [x1, y1] = worldToCanvas(conn.from_cx, conn.from_cy);
+    const [x2, y2] = worldToCanvas(conn.to_cx, conn.to_cy);
+    const dx = x2 - x1, dy = y2 - y1;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 10) continue;
+
+    // Shorten line: 30% from each end, max 20px
+    const shrink = Math.min(dist * 0.3, 20);
+    const ux = dx / dist, uy = dy / dist;
+    const sx = x1 + ux * shrink, sy = y1 + uy * shrink;
+    const ex = x2 - ux * shrink, ey = y2 - uy * shrink;
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(150,150,150,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+
+    // Arrowhead at target end
+    ctx.fillStyle = 'rgba(150,150,150,0.7)';
+    const angle = Math.atan2(ey - sy, ex - sx);
+    ctx.translate(ex, ey);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(-8, -4);
+    ctx.lineTo(-8, 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Draw snap indicator lines
+  if (state.snapLines.length > 0) {
+    ctx.save();
+    ctx.strokeStyle = '#00e5ff';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    for (const line of state.snapLines) {
+      if (line.axis === 'x') {
+        const [cx] = worldToCanvas(line.value, 0);
+        ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();
+      } else {
+        const [, cy] = worldToCanvas(0, line.value);
+        ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+}
+
+function drawPolygon(polygon, fill, stroke, lineWidth) {
+  ctx.beginPath();
+  const [mx, my] = worldToCanvas(polygon[0][0], polygon[0][1]);
+  ctx.moveTo(mx, my);
+  for (let i = 1; i < polygon.length; i++) {
+    const [px, py] = worldToCanvas(polygon[i][0], polygon[i][1]);
+    ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth || 1; ctx.stroke(); }
+}
+
+function blendColor(hex, overlay, alpha) {
+  const parse = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+  const [r1,g1,b1] = parse(hex);
+  const [r2,g2,b2] = parse(overlay);
+  const r = Math.round(r1*(1-alpha) + r2*alpha);
+  const g = Math.round(g1*(1-alpha) + g2*alpha);
+  const b = Math.round(b1*(1-alpha) + b2*alpha);
+  return `rgb(${r},${g},${b})`;
+}
+
+/* ═══════════════════════════════════════════════
+   Hit Testing
+   ═══════════════════════════════════════════════ */
+function pointInPolygon(px, py, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0], yi = polygon[i][1];
+    const xj = polygon[j][0], yj = polygon[j][1];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function hitTest(canvasX, canvasY) {
+  const [wx, wy] = canvasToWorld(canvasX, canvasY);
+  for (let i = state.spaces.length - 1; i >= 0; i--) {
+    const s = state.spaces[i];
+    if (!s.polygon || s.polygon.length < 3) continue;
+    if (pointInPolygon(wx, wy, s.polygon)) return s;
+  }
+  return null;
+}
+
+/* ═══════════════════════════════════════════════
+   Mouse Interaction
+   ═══════════════════════════════════════════════ */
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  if (state.mode === 'moveSpace') return;
+  state.isDragging = true;
+  state.dragStart = { x: e.clientX, y: e.clientY };
+  state.panStart = { ...state.pan };
+  canvas.classList.add('dragging');
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (state.isDragging) {
+    state.pan.x = state.panStart.x + (e.clientX - state.dragStart.x);
+    state.pan.y = state.panStart.y + (e.clientY - state.dragStart.y);
+    render();
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  // Move mode: update space position with snapping
+  if (state.mode === 'moveSpace' && state.moveSpace) {
+    const [rawWx, rawWy] = canvasToWorld(mx, my);
+    const origBB = getSpaceBBox({ polygon: state.moveOrigPoly });
+    const halfW = (origBB.maxX - origBB.minX) / 2;
+    const halfH = (origBB.maxY - origBB.minY) / 2;
+    const [sx, sy] = applySnap(rawWx, rawWy, halfW, halfH, state.moveSpace.id);
+    const dx = sx - state.moveOrigCentroid[0];
+    const dy = sy - state.moveOrigCentroid[1];
+    state.moveSpace.polygon = state.moveOrigPoly.map(([px, py]) => [px + dx, py + dy]);
+    state.moveSpace.centroid_x = sx;
+    state.moveSpace.centroid_y = sy;
+    render();
+    return;
+  }
+
+  const space = hitTest(mx, my);
+  if (space !== state.hoveredSpace) {
+    state.hoveredSpace = space;
+    render();
+  }
+  if (state.mode === 'addSpace' && state.selectedFloorId) {
+    const [rawWx, rawWy] = canvasToWorld(mx, my);
+    const w = parseFloat($('new-space-w').value) || 4;
+    const h = parseFloat($('new-space-h').value) || 3;
+    const halfW = w / 2, halfH = h / 2;
+    const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
+    tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
+    tooltip.textContent = `${wx.toFixed(1)}, ${wy.toFixed(1)} m`;
+    render();
+    const ghostPoly = [
+      [wx - halfW, wy - halfH], [wx + halfW, wy - halfH],
+      [wx + halfW, wy + halfH], [wx - halfW, wy + halfH], [wx - halfW, wy - halfH],
+    ];
+    const color = COLORS[$('new-space-type').value] || '#F0F0F0';
+    drawPolygon(ghostPoly, blendColor(color, '#ffffff', 0.4), '#4a90d9', 2);
+  } else if (space) {
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
+    tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
+    tooltip.textContent = `${space.display_name} (${space.space_type.replace(/_/g, ' ').toLowerCase()})`;
+  } else {
+    state.snapLines = [];
+    tooltip.style.display = 'none';
+  }
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (e.button !== 0) return;
+  hideContextMenu();
+
+  // Move mode: click to place
+  if (state.mode === 'moveSpace' && state.moveSpace) {
+    finishMove();
+    return;
+  }
+
+  const wasDrag = Math.abs(e.clientX - state.dragStart.x) > 3 || Math.abs(e.clientY - state.dragStart.y) > 3;
+  state.isDragging = false;
+  canvas.classList.remove('dragging');
+  if (wasDrag) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+
+  if (state.mode === 'addSpace') {
+    handleAddSpaceClick(cx, cy);
+    return;
+  }
+
+  if (state.mode === 'connect') {
+    handleConnectClick(cx, cy);
+    return;
+  }
+
+  // In select mode, clicking a space is a no-op
+});
+
+canvas.addEventListener('mouseleave', () => {
+  state.isDragging = false;
+  canvas.classList.remove('dragging');
+  tooltip.style.display = 'none';
+  if (state.hoveredSpace) { state.hoveredSpace = null; render(); }
+});
+
+// Right-click context menu
+canvas.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const cx = e.clientX - rect.left;
+  const cy = e.clientY - rect.top;
+  const space = hitTest(cx, cy);
+  if (!space) { hideContextMenu(); return; }
+  state.contextMenu = { space, x: cx, y: cy };
+  showContextMenu(cx, cy, rect);
+});
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  hideContextMenu();
+  const factor = e.deltaY > 0 ? 0.9 : 1.1;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  state.pan.x = mx - (mx - state.pan.x) * factor;
+  state.pan.y = my - (my - state.pan.y) * factor;
+  state.zoom *= factor;
+  render();
+}, { passive: false });
+
+/* ═══════════════════════════════════════════════
+   Sidebar: Selectors
+   ═══════════════════════════════════════════════ */
+$('campus-select').addEventListener('change', async function() {
+  const id = this.value;
+  state.selectedCampusId = id || null;
+  state.buildings = [];
+  state.floors = [];
+  state.spaces = [];
+  state.connections = [];
+
+  const bSel = $('building-select');
+  bSel.innerHTML = '<option value="">Select building...</option>';
+  bSel.disabled = true;
+  const fSel = $('floor-select');
+  fSel.innerHTML = '<option value="">Select floor...</option>';
+  fSel.disabled = true;
+  $('search-input').disabled = !id;
+  $('export-btn').disabled = !id;
+  $('add-building-btn').disabled = !id;
+  $('add-floor-btn').disabled = true;
+  updateMapVisibility();
+
+  if (!id) return;
+  try {
+    const data = await api(`/campuses/${id}/export`);
+    const campus = data.campus || data;
+    const buildings = campus.buildings || [];
+    state.buildings = buildings.map(b => ({ id: b.id, name: b.name }));
+    bSel.disabled = false;
+    for (const b of state.buildings) {
+      const opt = document.createElement('option');
+      opt.value = b.id;
+      opt.textContent = b.name;
+      bSel.appendChild(opt);
+    }
+    if (state.buildings.length === 1) {
+      bSel.value = state.buildings[0].id;
+      bSel.dispatchEvent(new Event('change'));
+    }
+  } catch (e) { /* handled */ }
+});
+
+$('building-select').addEventListener('change', async function() {
+  const id = this.value;
+  state.selectedBuildingId = id || null;
+  state.floors = [];
+  state.spaces = [];
+  state.connections = [];
+
+  const fSel = $('floor-select');
+  fSel.innerHTML = '<option value="">Select floor...</option>';
+  fSel.disabled = true;
+  $('add-floor-btn').disabled = !id;
+  updateMapVisibility();
+
+  if (!id) return;
+  try {
+    const floors = await api(`/buildings/${id}/floors`);
+    state.floors = floors;
+    fSel.disabled = false;
+    for (const f of floors) {
+      const opt = document.createElement('option');
+      opt.value = f.id;
+      opt.textContent = f.display_name;
+      opt.dataset.floorIndex = f.floor_index;
+      fSel.appendChild(opt);
+    }
+    if (floors.length === 1) {
+      fSel.value = floors[0].id;
+      fSel.dispatchEvent(new Event('change'));
+    }
+  } catch (e) { /* handled */ }
+});
+
+$('floor-select').addEventListener('change', async function() {
+  const id = this.value;
+  state.selectedFloorId = id || null;
+  state.spaces = [];
+  state.connections = [];
+  updateMapVisibility();
+
+  if (!id) return;
+  try {
+    const display = await api(`/floors/${id}/display`);
+    state.spaces = flattenSpaces(display.spaces || []);
+    const floor = display.floor || {};
+    state.currentFloorIndex = floor.floor_index ?? null;
+    state.currentBuildingId = floor.building_id ?? state.selectedBuildingId;
+    fitToCanvas();
+    updateMapVisibility();
+    // Load connections for this floor
+    await loadFloorConnections(id);
+    render();
+  } catch (e) { /* handled */ }
+});
+
+async function loadFloorConnections(floorId) {
+  try {
+    state.connections = await api(`/floors/${floorId}/connections`);
+  } catch (e) {
+    state.connections = [];
+  }
+}
+
+function flattenSpaces(spaces) {
+  const result = [];
+  for (const s of spaces) {
+    result.push(s);
+    if (s.subspaces && s.subspaces.length) {
+      result.push(...flattenSpaces(s.subspaces));
+    }
+  }
+  return result;
+}
+
+function updateMapVisibility() {
+  const hasFloor = !!state.selectedFloorId;
+  const hasSpaces = state.spaces.length > 0;
+  $('tools-panel').style.display = hasFloor ? 'block' : 'none';
+  if (hasFloor && !hasSpaces) {
+    emptyState.style.display = 'block';
+    $('empty-title').textContent = 'Empty floor';
+    $('empty-msg').innerHTML = 'Use the <strong>+ Space</strong> tool to add spaces to this floor.';
+  } else if (!hasFloor) {
+    emptyState.style.display = 'block';
+    $('empty-title').textContent = 'No floor selected';
+    $('empty-msg').innerHTML = 'Click <strong>+ New Map</strong> to create a map from scratch,<br>or import a map JSON file to get started.';
+  } else {
+    emptyState.style.display = 'none';
+  }
+  legend.className = hasSpaces ? 'visible' : '';
+}
+
+/* ═══════════════════════════════════════════════
+   Search
+   ═══════════════════════════════════════════════ */
+let searchTimer = null;
+$('search-input').addEventListener('input', function() {
+  clearTimeout(searchTimer);
+  const q = this.value.trim();
+  if (q.length < 2) { $('search-results').innerHTML = ''; return; }
+  searchTimer = setTimeout(async () => {
+    if (!state.selectedCampusId) return;
+    try {
+      const results = await api(`/campuses/${state.selectedCampusId}/search?q=${encodeURIComponent(q)}`);
+      displaySearchResults(results);
+    } catch (e) { /* handled */ }
+  }, 300);
+});
+
+function displaySearchResults(results) {
+  const container = $('search-results');
+  container.innerHTML = '';
+  if (!results.length) {
+    container.innerHTML = '<div style="padding:8px;color:#999;font-size:13px">No results found</div>';
+    return;
+  }
+  for (const r of results.slice(0, 10)) {
+    const div = document.createElement('div');
+    div.className = 'search-result';
+    div.innerHTML = `<div class="sr-name">${r.display_name}</div><div class="sr-type">${(r.space_type||'').replace(/_/g,' ').toLowerCase()} &middot; Floor ${r.floor_index ?? '?'}</div>`;
+    div.addEventListener('click', () => onSearchResultClick(r));
+    container.appendChild(div);
+  }
+}
+
+function onSearchResultClick(space) {
+  if (space.building_id && space.building_id !== state.selectedBuildingId) {
+    $('building-select').value = space.building_id;
+    $('building-select').dispatchEvent(new Event('change'));
+    setTimeout(() => selectFloorByIndex(space.floor_index), 500);
+  } else {
+    selectFloorByIndex(space.floor_index);
+  }
+}
+
+function selectFloorByIndex(floorIndex) {
+  const fSel = $('floor-select');
+  for (const opt of fSel.options) {
+    if (opt.dataset.floorIndex === String(floorIndex)) {
+      fSel.value = opt.value;
+      fSel.dispatchEvent(new Event('change'));
+      break;
+    }
+  }
+}
+
+function findSpaceById(id) {
+  return state.spaces.find(s => s.id === id) || null;
+}
+
+/* ═══════════════════════════════════════════════
+   Map Import
+   ═══════════════════════════════════════════════ */
+$('import-file').addEventListener('change', function() {
+  $('import-btn').disabled = !this.files.length;
+});
+
+$('import-btn').addEventListener('click', async () => {
+  const file = $('import-file').files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const json = JSON.parse(text);
+    const campusId = json.campus?.id;
+    if (!campusId) { notify('Invalid map JSON: missing campus.id', 'error'); return; }
+
+    $('import-btn').disabled = true;
+    $('import-btn').textContent = 'Importing...';
+    const result = await api(`/campuses/${campusId}/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: text,
+    });
+    notify(`Imported: ${result.spaces_imported} spaces, ${result.connections_imported} connections`);
+    await loadCampuses();
+    $('campus-select').value = campusId;
+    $('campus-select').dispatchEvent(new Event('change'));
+  } catch (e) {
+    /* notify already called */
+  } finally {
+    $('import-btn').disabled = false;
+    $('import-btn').textContent = 'Import';
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Export
+   ═══════════════════════════════════════════════ */
+$('export-btn').addEventListener('click', async () => {
+  if (!state.selectedCampusId) return;
+  try {
+    const data = await api(`/campuses/${state.selectedCampusId}/export`);
+    const campusName = (data.campus || data).name || 'export';
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${campusName.replace(/\s+/g, '_')}_export.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    notify('Export downloaded');
+  } catch (e) { /* handled */ }
+});
+
+/* ═══════════════════════════════════════════════
+   New Map Modal
+   ═══════════════════════════════════════════════ */
+function uuid() { return crypto.randomUUID(); }
+
+$('new-map-btn').addEventListener('click', () => {
+  $('modal-overlay').style.display = 'flex';
+  $('new-campus-name').value = '';
+  $('new-building-name').value = '';
+  $('new-floor-name').value = 'Ground Floor';
+  $('new-floor-index').value = '0';
+  setTimeout(() => $('new-campus-name').focus(), 100);
+});
+
+$('modal-cancel').addEventListener('click', () => {
+  $('modal-overlay').style.display = 'none';
+});
+
+$('modal-overlay').addEventListener('click', e => {
+  if (e.target === $('modal-overlay')) $('modal-overlay').style.display = 'none';
+});
+
+$('modal-create').addEventListener('click', async () => {
+  const campusName = $('new-campus-name').value.trim();
+  const buildingName = $('new-building-name').value.trim();
+  const floorName = $('new-floor-name').value.trim();
+  const floorIndex = parseInt($('new-floor-index').value) || 0;
+
+  if (!campusName) { notify('Campus name is required', 'error'); return; }
+  if (!buildingName) { notify('Building name is required', 'error'); return; }
+  if (!floorName) { notify('Floor name is required', 'error'); return; }
+
+  const campusId = uuid();
+  const buildingId = uuid();
+  const floorId = uuid();
+
+  const importData = {
+    schema_version: '1.0',
+    campus: {
+      id: campusId,
+      name: campusName,
+      buildings: [{
+        id: buildingId,
+        name: buildingName,
+        floors: [{
+          id: floorId,
+          floor_index: floorIndex,
+          display_name: floorName,
+          spaces: []
+        }]
+      }],
+      outdoor_spaces: [],
+      connections: []
+    }
+  };
+
+  try {
+    $('modal-create').disabled = true;
+    $('modal-create').textContent = 'Creating...';
+    await api(`/campuses/${campusId}/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(importData),
+    });
+    notify(`Map "${campusName}" created`);
+    $('modal-overlay').style.display = 'none';
+
+    await loadCampuses();
+    $('campus-select').value = campusId;
+    $('campus-select').dispatchEvent(new Event('change'));
+  } catch (e) { /* handled */ }
+  finally {
+    $('modal-create').disabled = false;
+    $('modal-create').textContent = 'Create Map';
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Add Building Modal
+   ═══════════════════════════════════════════════ */
+$('add-building-btn').addEventListener('click', () => {
+  $('building-modal-overlay').style.display = 'flex';
+  $('modal-building-name').value = '';
+  setTimeout(() => $('modal-building-name').focus(), 100);
+});
+
+$('building-modal-cancel').addEventListener('click', () => {
+  $('building-modal-overlay').style.display = 'none';
+});
+
+$('building-modal-overlay').addEventListener('click', e => {
+  if (e.target === $('building-modal-overlay')) $('building-modal-overlay').style.display = 'none';
+});
+
+$('building-modal-create').addEventListener('click', async () => {
+  const name = $('modal-building-name').value.trim();
+  if (!name) { notify('Building name is required', 'error'); return; }
+  if (!state.selectedCampusId) { notify('Select a campus first', 'error'); return; }
+
+  const buildingId = uuid();
+  try {
+    $('building-modal-create').disabled = true;
+    await api('/buildings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: buildingId, campus_id: state.selectedCampusId, name }),
+    });
+    notify(`Building "${name}" created`);
+    $('building-modal-overlay').style.display = 'none';
+
+    // Refresh building list by re-dispatching campus change
+    $('campus-select').dispatchEvent(new Event('change'));
+    // Auto-select new building after refresh
+    setTimeout(() => {
+      $('building-select').value = buildingId;
+      $('building-select').dispatchEvent(new Event('change'));
+    }, 500);
+  } catch (e) { /* handled */ }
+  finally {
+    $('building-modal-create').disabled = false;
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Add Floor Modal
+   ═══════════════════════════════════════════════ */
+$('add-floor-btn').addEventListener('click', () => {
+  $('floor-modal-overlay').style.display = 'flex';
+  $('modal-floor-name').value = '';
+  $('modal-floor-index').value = '0';
+  setTimeout(() => $('modal-floor-name').focus(), 100);
+});
+
+$('floor-modal-cancel').addEventListener('click', () => {
+  $('floor-modal-overlay').style.display = 'none';
+});
+
+$('floor-modal-overlay').addEventListener('click', e => {
+  if (e.target === $('floor-modal-overlay')) $('floor-modal-overlay').style.display = 'none';
+});
+
+$('floor-modal-create').addEventListener('click', async () => {
+  const name = $('modal-floor-name').value.trim();
+  const floorIndex = parseInt($('modal-floor-index').value) || 0;
+  if (!name) { notify('Floor name is required', 'error'); return; }
+  if (!state.selectedBuildingId) { notify('Select a building first', 'error'); return; }
+
+  const floorId = uuid();
+  try {
+    $('floor-modal-create').disabled = true;
+    await api('/floors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: floorId, building_id: state.selectedBuildingId, floor_index: floorIndex, display_name: name }),
+    });
+    notify(`Floor "${name}" created`);
+    $('floor-modal-overlay').style.display = 'none';
+
+    // Refresh floor list by re-dispatching building change
+    $('building-select').dispatchEvent(new Event('change'));
+    // Auto-select new floor after refresh
+    setTimeout(() => {
+      $('floor-select').value = floorId;
+      $('floor-select').dispatchEvent(new Event('change'));
+    }, 500);
+  } catch (e) { /* handled */ }
+  finally {
+    $('floor-modal-create').disabled = false;
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Edit Tool Modes
+   ═══════════════════════════════════════════════ */
+function setMode(mode) {
+  state.mode = mode;
+  state.connectFrom = null;
+
+  for (const btn of document.querySelectorAll('.tool-bar button')) {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  }
+
+  $('add-space-form').style.display = mode === 'addSpace' ? 'block' : 'none';
+  $('connect-form').style.display = mode === 'connect' ? 'block' : 'none';
+
+  canvas.classList.toggle('crosshair', mode === 'addSpace');
+
+  if (mode === 'addSpace' && state.selectedFloorId && !state.bounds) {
+    fitToCanvas();
+  }
+
+  if (mode === 'connect') {
+    $('connect-status').textContent = 'Click the first space (start), then click the second space (end).';
+    $('connect-status').className = 'tool-hint';
+  }
+
+  render();
+}
+
+$('tool-select').addEventListener('click', () => setMode('select'));
+$('tool-add-space').addEventListener('click', () => setMode('addSpace'));
+$('tool-connect').addEventListener('click', () => setMode('connect'));
+
+/* ═══════════════════════════════════════════════
+   Add Space on Click
+   ═══════════════════════════════════════════════ */
+async function handleAddSpaceClick(canvasX, canvasY) {
+  if (!state.selectedFloorId) { notify('Select a floor first', 'error'); return; }
+
+  const name = $('new-space-name').value.trim();
+  if (!name) { notify('Enter a space name first', 'error'); $('new-space-name').focus(); return; }
+
+  const [rawWx, rawWy] = canvasToWorld(canvasX, canvasY);
+  const w = parseFloat($('new-space-w').value) || 4;
+  const h = parseFloat($('new-space-h').value) || 3;
+  const halfW = w / 2, halfH = h / 2;
+  const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
+  state.snapLines = [];
+
+  const spaceData = {
+    id: uuid(),
+    display_name: name,
+    space_type: $('new-space-type').value,
+    floor_id: state.selectedFloorId,
+    building_id: state.selectedBuildingId,
+    campus_id: state.selectedCampusId,
+    floor_index: state.currentFloorIndex,
+    centroid_x: wx,
+    centroid_y: wy,
+    polygon: [
+      [wx - halfW, wy - halfH],
+      [wx + halfW, wy - halfH],
+      [wx + halfW, wy + halfH],
+      [wx - halfW, wy + halfH],
+      [wx - halfW, wy - halfH],
+    ],
+    is_accessible: true,
+    is_navigable: true,
+    is_outdoor: false,
+    tags: [],
+  };
+
+  try {
+    await api('/spaces', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(spaceData),
+    });
+    notify(`Space "${name}" added`);
+    await reloadCurrentFloor();
+    $('new-space-name').value = '';
+    $('new-space-name').focus();
+  } catch (e) { /* handled */ }
+}
+
+/* ═══════════════════════════════════════════════
+   Connect Spaces on Click
+   ═══════════════════════════════════════════════ */
+async function handleConnectClick(canvasX, canvasY) {
+  const space = hitTest(canvasX, canvasY);
+  if (!space) { notify('Click on a space to select it', 'error'); return; }
+
+  if (!state.connectFrom) {
+    state.connectFrom = space;
+    $('connect-status').innerHTML = `From: <span class="connect-from-badge">${space.display_name}</span><br>Now click the second space.`;
+    render();
+    return;
+  }
+
+  if (space.id === state.connectFrom.id) {
+    notify('Cannot connect a space to itself', 'error');
+    return;
+  }
+
+  const connType = $('new-conn-type').value;
+  const bidir = $('new-conn-bidir').checked;
+  const accessible = $('new-conn-accessible').checked;
+  const from = state.connectFrom;
+
+  const dist = Math.sqrt(
+    Math.pow((space.centroid_x || 0) - (from.centroid_x || 0), 2) +
+    Math.pow((space.centroid_y || 0) - (from.centroid_y || 0), 2)
+  );
+  const weight = dist / 1.4;
+
+  const connData = {
+    from_space_id: from.id,
+    to_space_id: space.id,
+    connection_type: connType,
+    weight: weight,
+    distance_m: dist,
+    is_accessible: accessible,
+    door_type: 'NONE',
+  };
+
+  try {
+    await api('/connections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(connData),
+    });
+
+    if (bidir) {
+      const reverseType = getReverse(connType);
+      await api('/connections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...connData, from_space_id: space.id, to_space_id: from.id, connection_type: reverseType }),
+      });
+    }
+
+    notify(`Connected "${from.display_name}" to "${space.display_name}"`);
+    state.connectFrom = null;
+    $('connect-status').textContent = 'Click the first space (start), then click the second space (end).';
+    $('connect-status').className = 'tool-hint';
+
+    // Refresh connections
+    if (state.selectedFloorId) await loadFloorConnections(state.selectedFloorId);
+    render();
+
+    // Refresh GDS projection
+    api('/navigate/refresh-graph', { method: 'POST' }).catch(() => {});
+  } catch (e) { /* handled */ }
+}
+
+function getReverse(connType) {
+  const map = {
+    STAIRCASE_UP: 'STAIRCASE_DOWN', STAIRCASE_DOWN: 'STAIRCASE_UP',
+    ELEVATOR_UP: 'ELEVATOR_DOWN', ELEVATOR_DOWN: 'ELEVATOR_UP',
+    ESCALATOR_UP: 'ESCALATOR_DOWN', ESCALATOR_DOWN: 'ESCALATOR_UP',
+    RAMP_UP: 'RAMP_DOWN', RAMP_DOWN: 'RAMP_UP',
+  };
+  return map[connType] || connType;
+}
+
+/* ═══════════════════════════════════════════════
+   Context Menu
+   ═══════════════════════════════════════════════ */
+function showContextMenu(cx, cy, containerRect) {
+  const menu = $('context-menu');
+  menu.style.display = 'block';
+  const mw = menu.offsetWidth || 150;
+  const mh = menu.offsetHeight || 140;
+  let left = cx, top = cy;
+  if (left + mw > containerRect.width) left = containerRect.width - mw - 4;
+  if (top + mh > containerRect.height) top = containerRect.height - mh - 4;
+  if (left < 0) left = 4;
+  if (top < 0) top = 4;
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
+function hideContextMenu() {
+  $('context-menu').style.display = 'none';
+  state.contextMenu = null;
+}
+
+$('ctx-info').addEventListener('click', () => {
+  if (!state.contextMenu) return;
+  showInfoModal(state.contextMenu.space);
+  hideContextMenu();
+});
+$('ctx-move').addEventListener('click', () => {
+  if (!state.contextMenu) return;
+  startMoveMode(state.contextMenu.space);
+  hideContextMenu();
+});
+$('ctx-duplicate').addEventListener('click', () => {
+  if (!state.contextMenu) return;
+  duplicateSpace(state.contextMenu.space);
+  hideContextMenu();
+});
+$('ctx-delete').addEventListener('click', () => {
+  if (!state.contextMenu) return;
+  deleteSpace(state.contextMenu.space);
+  hideContextMenu();
+});
+
+/* ═══════════════════════════════════════════════
+   Info Modal (Editable)
+   ═══════════════════════════════════════════════ */
+async function showInfoModal(space) {
+  state._editingSpace = space;
+  $('info-title').textContent = space.display_name || 'Space Info';
+  const grid = $('info-grid');
+
+  // Compute width/height from bounding box
+  const bb = getSpaceBBox(space);
+  const spaceW = bb ? (bb.maxX - bb.minX).toFixed(2) : '0';
+  const spaceH = bb ? (bb.maxY - bb.minY).toFixed(2) : '0';
+
+  grid.innerHTML = `
+    <span class="lbl">Name</span><input class="val-input" id="info-name" value="${(space.display_name || '').replace(/"/g, '&quot;')}">
+    <span class="lbl">Type</span><span class="val">${(space.space_type || '').replace(/_/g, ' ')}</span>
+    <span class="lbl">Width (m)</span><input class="val-input" id="info-width" type="number" step="0.1" value="${spaceW}">
+    <span class="lbl">Height (m)</span><input class="val-input" id="info-height" type="number" step="0.1" value="${spaceH}">
+    <span class="lbl">X</span><input class="val-input" id="info-cx" type="number" step="0.1" value="${(space.centroid_x||0).toFixed(2)}">
+    <span class="lbl">Y</span><input class="val-input" id="info-cy" type="number" step="0.1" value="${(space.centroid_y||0).toFixed(2)}">
+    <span class="lbl">Accessible</span><span class="val">${space.is_accessible ? 'Yes' : 'No'}</span>
+  `;
+
+  const connDiv = $('info-connections');
+  connDiv.innerHTML = '<span style="color:#aaa">Loading...</span>';
+  $('info-overlay').style.display = 'flex';
+
+  try {
+    const conns = await api(`/spaces/${space.id}/connections`);
+    if (!conns.length) {
+      connDiv.innerHTML = '<span style="color:#aaa">No connections</span>';
+    } else {
+      connDiv.innerHTML = conns.map(c => `
+        <div class="conn-item">
+          <span class="conn-dir">${c.direction === 'outgoing' ? '&#8594;' : '&#8592;'}</span>
+          <span>${c.other_space_name || c.other_space_id}</span>
+          <span style="color:#999;margin-left:auto;font-size:11px">${(c.connection_type || '').replace(/_/g, ' ').toLowerCase()}</span>
+        </div>
+      `).join('');
+    }
+  } catch (e) {
+    connDiv.innerHTML = '<span style="color:#d9534f">Failed to load connections</span>';
+  }
+}
+
+$('info-save').addEventListener('click', async () => {
+  const space = state._editingSpace;
+  if (!space) return;
+
+  const newName = $('info-name').value.trim();
+  const newW = parseFloat($('info-width').value) || 1;
+  const newH = parseFloat($('info-height').value) || 1;
+  const newCx = parseFloat($('info-cx').value) || 0;
+  const newCy = parseFloat($('info-cy').value) || 0;
+
+  const halfW = newW / 2, halfH = newH / 2;
+  const newPoly = [
+    [newCx - halfW, newCy - halfH],
+    [newCx + halfW, newCy - halfH],
+    [newCx + halfW, newCy + halfH],
+    [newCx - halfW, newCy + halfH],
+    [newCx - halfW, newCy - halfH],
+  ];
+
+  try {
+    await api(`/spaces/${space.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        display_name: newName,
+        centroid_x: newCx,
+        centroid_y: newCy,
+        polygon: newPoly,
+      }),
+    });
+    notify(`Updated "${newName}"`);
+    $('info-overlay').style.display = 'none';
+    await reloadCurrentFloor();
+  } catch (e) { /* handled */ }
+});
+
+$('info-close').addEventListener('click', () => {
+  $('info-overlay').style.display = 'none';
+});
+$('info-overlay').addEventListener('click', e => {
+  if (e.target === $('info-overlay')) $('info-overlay').style.display = 'none';
+});
+
+/* ═══════════════════════════════════════════════
+   Move Mode
+   ═══════════════════════════════════════════════ */
+function startMoveMode(space) {
+  state.mode = 'moveSpace';
+  state.moveSpace = space;
+  state.moveOrigPoly = space.polygon.map(p => [...p]);
+  state.moveOrigCentroid = [space.centroid_x, space.centroid_y];
+  canvas.classList.add('crosshair');
+  for (const btn of document.querySelectorAll('.tool-bar button')) {
+    btn.classList.remove('active');
+  }
+  $('add-space-form').style.display = 'none';
+  $('connect-form').style.display = 'none';
+}
+
+async function finishMove() {
+  const space = state.moveSpace;
+  if (!space) return;
+  state.snapLines = [];
+  try {
+    await api(`/spaces/${space.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        polygon: space.polygon,
+        centroid_x: space.centroid_x,
+        centroid_y: space.centroid_y,
+      }),
+    });
+    notify(`Moved "${space.display_name}"`);
+  } catch (e) {
+    space.polygon = state.moveOrigPoly;
+    space.centroid_x = state.moveOrigCentroid[0];
+    space.centroid_y = state.moveOrigCentroid[1];
+  }
+  exitMoveMode();
+}
+
+function cancelMove() {
+  if (state.moveSpace && state.moveOrigPoly) {
+    state.moveSpace.polygon = state.moveOrigPoly;
+    state.moveSpace.centroid_x = state.moveOrigCentroid[0];
+    state.moveSpace.centroid_y = state.moveOrigCentroid[1];
+  }
+  state.snapLines = [];
+  exitMoveMode();
+  render();
+}
+
+function exitMoveMode() {
+  state.mode = 'select';
+  state.moveSpace = null;
+  state.moveOrigPoly = null;
+  state.moveOrigCentroid = null;
+  canvas.classList.remove('crosshair');
+  $('tool-select').classList.add('active');
+  render();
+}
+
+/* ═══════════════════════════════════════════════
+   Duplicate Space
+   ═══════════════════════════════════════════════ */
+async function duplicateSpace(space) {
+  const bb = getSpaceBBox(space);
+  if (!bb) return;
+  const bbW = bb.maxX - bb.minX;
+  const offset = gridSnap(bbW + 1);
+  const newPoly = space.polygon.map(([x, y]) => [x + offset, y]);
+  const newCx = (space.centroid_x || 0) + offset;
+  const newCy = space.centroid_y || 0;
+
+  const spaceData = {
+    id: uuid(),
+    display_name: (space.display_name || 'Space') + ' (copy)',
+    space_type: space.space_type,
+    floor_id: state.selectedFloorId,
+    building_id: state.selectedBuildingId || space.building_id,
+    campus_id: state.selectedCampusId || space.campus_id,
+    floor_index: state.currentFloorIndex,
+    centroid_x: newCx,
+    centroid_y: newCy,
+    polygon: newPoly,
+    is_accessible: space.is_accessible ?? true,
+    is_navigable: space.is_navigable ?? true,
+    is_outdoor: space.is_outdoor ?? false,
+    tags: space.tags || [],
+  };
+
+  try {
+    await api('/spaces', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(spaceData),
+    });
+    notify(`Duplicated "${space.display_name}"`);
+    await reloadCurrentFloor();
+  } catch (e) { /* handled */ }
+}
+
+/* ═══════════════════════════════════════════════
+   Delete Space
+   ═══════════════════════════════════════════════ */
+async function deleteSpace(space) {
+  if (!window.confirm(`Delete "${space.display_name}"? This cannot be undone.`)) return;
+  try {
+    await api(`/spaces/${space.id}`, { method: 'DELETE' });
+    notify(`Deleted "${space.display_name}"`);
+    await reloadCurrentFloor();
+  } catch (e) { /* handled */ }
+}
+
+/* ═══════════════════════════════════════════════
+   Escape key handler
+   ═══════════════════════════════════════════════ */
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (state.mode === 'moveSpace') {
+      cancelMove();
+    }
+    hideContextMenu();
+    $('info-overlay').style.display = 'none';
+    $('building-modal-overlay').style.display = 'none';
+    $('floor-modal-overlay').style.display = 'none';
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Reload Floor
+   ═══════════════════════════════════════════════ */
+async function reloadCurrentFloor() {
+  if (!state.selectedFloorId) return;
+  try {
+    const display = await api(`/floors/${state.selectedFloorId}/display`);
+    state.spaces = flattenSpaces(display.spaces || []);
+    const floor = display.floor || {};
+    state.currentFloorIndex = floor.floor_index ?? null;
+    state.currentBuildingId = floor.building_id ?? state.selectedBuildingId;
+    fitToCanvas();
+    updateMapVisibility();
+    await loadFloorConnections(state.selectedFloorId);
+    render();
+  } catch (e) { /* handled */ }
+}
+
+/* ═══════════════════════════════════════════════
+   Initialization
+   ═══════════════════════════════════════════════ */
+async function loadCampuses() {
+  try {
+    state.campuses = await api('/campuses');
+  } catch (e) {
+    state.campuses = [];
+  }
+  const sel = $('campus-select');
+  sel.innerHTML = '<option value="">Select campus...</option>';
+  for (const c of state.campuses) {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    sel.appendChild(opt);
+  }
+}
+
+async function init() {
+  resizeCanvas();
+  window.addEventListener('resize', () => {
+    resizeCanvas();
+    if (state.bounds) fitToCanvas();
+    render();
+  });
+  await loadCampuses();
+  if (state.campuses.length === 1) {
+    $('campus-select').value = state.campuses[0].id;
+    $('campus-select').dispatchEvent(new Event('change'));
+  }
+}
+
+init();
+</script>
+</body>
+</html>

@@ -3,6 +3,7 @@ from db import Database, get_db
 from core.exceptions import SpaceNotFound
 from models.space import Space, SpaceCreate, SpaceUpdate
 from repositories.space_repo import SpaceRepository
+from repositories.connection_repo import ConnectionRepository
 
 router = APIRouter(prefix="/spaces", tags=["spaces"])
 
@@ -34,3 +35,8 @@ def delete_space(space_id: str, db: Database = Depends(get_db)):
         SpaceRepository(db).delete_space(space_id)
     except SpaceNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/{space_id}/connections")
+def list_connections_for_space(space_id: str, db: Database = Depends(get_db)):
+    return ConnectionRepository(db).list_connections_for_space(space_id)

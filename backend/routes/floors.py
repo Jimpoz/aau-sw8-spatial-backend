@@ -1,11 +1,17 @@
 from fastapi import APIRouter, HTTPException, Depends
 from db import Database, get_db
 from core.exceptions import FloorNotFound
-from models.campus import Floor
+from models.campus import Floor, FloorCreate
 from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
+from repositories.connection_repo import ConnectionRepository
 
 router = APIRouter(prefix="/floors", tags=["floors"])
+
+
+@router.post("", response_model=Floor, status_code=201)
+def create_floor(data: FloorCreate, db: Database = Depends(get_db)):
+    return CampusRepository(db).create_floor(data)
 
 
 @router.get("/{floor_id}", response_model=Floor)
@@ -34,3 +40,12 @@ def floor_display(floor_id: str, db: Database = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(e))
     spaces = SpaceRepository(db).get_floor_display(floor_id)
     return {"floor": floor, "spaces": spaces}
+
+
+@router.get("/{floor_id}/connections")
+def floor_connections(floor_id: str, db: Database = Depends(get_db)):
+    try:
+        CampusRepository(db).get_floor(floor_id)
+    except FloorNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return ConnectionRepository(db).list_connections_for_floor(floor_id)

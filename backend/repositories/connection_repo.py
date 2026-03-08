@@ -54,6 +54,42 @@ class ConnectionRepository:
         )
         return [r["r"] for r in result]
 
+    def list_connections_for_space(self, space_id: str) -> list[dict]:
+        result = self.db.execute(
+            """
+            MATCH (a:Space {id: $id})-[r:CONNECTS_TO]->(b:Space)
+            RETURN properties(r) AS r, b.id AS other_space_id,
+                   b.display_name AS other_space_name, 'outgoing' AS direction
+            UNION
+            MATCH (a:Space)-[r:CONNECTS_TO]->(b:Space {id: $id})
+            RETURN properties(r) AS r, a.id AS other_space_id,
+                   a.display_name AS other_space_name, 'incoming' AS direction
+            """,
+            {"id": space_id},
+        )
+        return [
+            {**row["r"], "other_space_id": row["other_space_id"],
+             "other_space_name": row["other_space_name"], "direction": row["direction"]}
+            for row in result
+        ]
+
+    def list_connections_for_floor(self, floor_id: str) -> list[dict]:
+        result = self.db.execute(
+            """
+            MATCH (a:Space {floor_id: $floor_id})-[r:CONNECTS_TO]->(b:Space {floor_id: $floor_id})
+            RETURN properties(r) AS r, a.id AS from_id, b.id AS to_id,
+                   a.centroid_x AS from_cx, a.centroid_y AS from_cy,
+                   b.centroid_x AS to_cx, b.centroid_y AS to_cy
+            """,
+            {"floor_id": floor_id},
+        )
+        return [
+            {**row["r"], "from_id": row["from_id"], "to_id": row["to_id"],
+             "from_cx": row["from_cx"], "from_cy": row["from_cy"],
+             "to_cx": row["to_cx"], "to_cy": row["to_cy"]}
+            for row in result
+        ]
+
     def list_connections_for_campus(self, campus_id: str) -> list[dict]:
         result = self.db.execute(
             """

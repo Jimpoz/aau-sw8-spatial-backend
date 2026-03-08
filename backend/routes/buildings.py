@@ -7,6 +7,11 @@ from repositories.campus_repo import CampusRepository
 router = APIRouter(prefix="/buildings", tags=["buildings"])
 
 
+@router.post("", response_model=Building, status_code=201)
+def create_building(data: BuildingCreate, db: Database = Depends(get_db)):
+    return CampusRepository(db).create_building(data)
+
+
 @router.get("/{building_id}", response_model=Building)
 def get_building(building_id: str, db: Database = Depends(get_db)):
     try:
