@@ -25,6 +25,7 @@ class SpaceCreate(BaseModel):
     capacity: Optional[int] = None
     tags: list[str] = []
     metadata: Optional[dict] = None
+    embedding: Optional[list[float]] = None
 
 
 class SpaceUpdate(BaseModel):
@@ -40,6 +41,7 @@ class SpaceUpdate(BaseModel):
     capacity: Optional[int] = None
     tags: Optional[list[str]] = None
     metadata: Optional[dict[str, Any]] = None
+    embedding: Optional[list[float]] = None
 
 
 class Space(BaseModel):

@@ -4,3 +4,7 @@ uvicorn[standard]>=0.29,<1.0
 pydantic>=2.6,<3.0
 pydantic-settings>=2.2,<3.0
 shapely>=2.0,<3.0
+sentence-transformers>=2.5
+transformers>=4.38
+torch>=2.2
+accelerate>=0.27

@@ -12,7 +12,9 @@ from services.geometry_service import (
     distance_m,
     compute_weight,
 )
+from sentence_transformers import SentenceTransformer
 
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 class ImportService:
     def __init__(self, db: Database):
@@ -110,6 +112,10 @@ class ImportService:
 
         if cx is not None and cy is not None:
             self._centroids[space.id] = (cx, cy)
+            
+        text_to_embed = f"{space.display_name}. Type: {space.space_type}. Tags: {' '.join(space.tags)}"
+        
+        vector = embedder.encode(text_to_embed).tolist()
 
         self.space_repo.create_space(
             SpaceCreate(
@@ -134,6 +140,7 @@ class ImportService:
                 capacity=space.capacity,
                 tags=space.tags,
                 metadata=space.metadata,
+                embedding=vector,
             )
         )
 

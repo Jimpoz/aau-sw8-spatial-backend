@@ -136,13 +136,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .conn-list { max-height: 180px; overflow-y: auto; font-size: 13px; }
 .conn-item { padding: 4px 0; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 6px; }
 .conn-dir { font-size: 16px; flex-shrink: 0; }
+#chat-history {
+  max-height: 250px; overflow-y: auto; margin-bottom: 10px;
+  display: flex; flex-direction: column; gap: 8px; font-size: 13px;
+}
+.chat-msg { padding: 8px 10px; border-radius: 8px; line-height: 1.4; max-width: 90%; }
+.chat-msg.user { background: #eef4fc; color: #1a5c9e; align-self: flex-end; border-bottom-right-radius: 2px; }
+.chat-msg.bot { background: #f5f5f5; color: #333; align-self: flex-start; border: 1px solid #e0e0e0; border-bottom-left-radius: 2px; }
+.chat-sources { font-size: 10px; color: #888; margin-top: 6px; border-top: 1px solid #ddd; padding-top: 4px; }
 </style>
 </head>
 <body>
 
-<!-- ── Sidebar ── -->
 <div id="sidebar">
-  <!-- Map Selection -->
   <div class="panel">
     <h3>Map</h3>
     <label for="campus-select">Campus</label>
@@ -159,14 +165,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <button class="btn-primary" id="export-btn" disabled style="margin-top:6px">Export JSON</button>
   </div>
 
-  <!-- Search -->
   <div class="panel">
     <h3>Search</h3>
     <input type="text" id="search-input" placeholder="Search spaces..." disabled>
     <div id="search-results"></div>
   </div>
 
-  <!-- Edit Tools -->
+  <div class="panel">
+    <h3>AI Assistant</h3>
+    <div id="chat-history">
+      <div style="color: #888; font-style: italic; text-align: center; margin-top: 10px;">
+        Ask me anything about the campus!
+      </div>
+    </div>
+    <input type="text" id="chat-input" placeholder="e.g. Where is the cafeteria?" disabled>
+    <button class="btn-primary" id="chat-btn" disabled>Ask</button>
+  </div>
+
   <div class="panel" id="tools-panel" style="display:none">
     <h3>Edit Tools</h3>
     <div class="tool-bar">
@@ -174,7 +189,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <button id="tool-add-space" data-mode="addSpace">+ Space</button>
       <button id="tool-connect" data-mode="connect">Connect</button>
     </div>
-    <!-- Add Space form -->
     <div id="add-space-form" style="display:none">
       <label for="new-space-name">Name</label>
       <input type="text" id="new-space-name" placeholder="Room 101">
@@ -234,7 +248,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       </div>
       <p class="tool-hint">Click on the map to place the space at that location.</p>
     </div>
-    <!-- Connect form -->
     <div id="connect-form" style="display:none">
       <label for="new-conn-type">Connection Type</label>
       <select id="new-conn-type">
@@ -262,7 +275,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     </div>
   </div>
 
-  <!-- Import -->
   <div class="panel">
     <h3>Import Map</h3>
     <input type="file" id="import-file" accept=".json">
@@ -270,7 +282,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
 </div>
 
-<!-- ── New Map Modal ── -->
 <div id="modal-overlay" class="modal-overlay" style="display:none">
   <div class="modal">
     <h2>Create New Map</h2>
@@ -289,7 +300,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
 </div>
 
-<!-- ── Add Building Modal ── -->
 <div id="building-modal-overlay" class="modal-overlay" style="display:none">
   <div class="modal">
     <h2>Add Building</h2>
@@ -302,7 +312,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
 </div>
 
-<!-- ── Add Floor Modal ── -->
 <div id="floor-modal-overlay" class="modal-overlay" style="display:none">
   <div class="modal">
     <h2>Add Floor</h2>
@@ -317,7 +326,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
 </div>
 
-<!-- ── Map ── -->
 <div id="map-container">
   <canvas id="map-canvas"></canvas>
   <div id="tooltip"></div>
@@ -343,7 +351,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
 </div>
 
-<!-- Info Modal -->
 <div id="info-overlay" class="modal-overlay" style="display:none">
   <div class="modal" style="width:440px">
     <h2 id="info-title">Space Info</h2>
@@ -925,6 +932,11 @@ $('campus-select').addEventListener('change', async function() {
   $('export-btn').disabled = !id;
   $('add-building-btn').disabled = !id;
   $('add-floor-btn').disabled = true;
+  
+  // Enable AI Assistant
+  $('chat-input').disabled = !id;
+  $('chat-btn').disabled = !id;
+
   updateMapVisibility();
 
   if (!id) return;
@@ -1762,6 +1774,81 @@ async function reloadCurrentFloor() {
     render();
   } catch (e) { /* handled */ }
 }
+
+/* ═══════════════════════════════════════════════
+   AI Assistant
+   ═══════════════════════════════════════════════ */
+$('chat-btn').addEventListener('click', async () => {
+  const input = $('chat-input');
+  const query = input.value.trim();
+  if (!query || !state.selectedCampusId) return;
+
+  const history = $('chat-history');
+
+  // Remove the placeholder text if it's the first message
+  if (history.children.length === 1 && history.children[0].style.fontStyle === 'italic') {
+    history.innerHTML = '';
+  }
+
+  // 1. Display User Message
+  const userDiv = document.createElement('div');
+  userDiv.className = 'chat-msg user';
+  userDiv.textContent = query;
+  history.appendChild(userDiv);
+
+  // 2. Lock input and show loading state
+  input.value = '';
+  input.disabled = true;
+  $('chat-btn').disabled = true;
+  $('chat-btn').textContent = 'Thinking...';
+  history.scrollTop = history.scrollHeight;
+
+  try {
+    // 3. Call your new backend endpoint
+    const res = await api('/assistant/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_query: query, campus_id: state.selectedCampusId })
+    });
+
+    // 4. Display Bot Message
+    const botDiv = document.createElement('div');
+    botDiv.className = 'chat-msg bot';
+    
+    // Parse line breaks for formatting
+    let contentHtml = `<div>${res.answer.replace(/\n/g, '<br>')}</div>`;
+    
+    // Append the source citations if the backend found any
+    if (res.sources && res.sources.length > 0) {
+      // Deduplicate sources just in case
+      const uniqueSources = [...new Set(res.sources)];
+      contentHtml += `<div class="chat-sources">Sources: ${uniqueSources.join(', ')}</div>`;
+    }
+    
+    botDiv.innerHTML = contentHtml;
+    history.appendChild(botDiv);
+
+  } catch (e) {
+    // Display errors directly in the chat
+    const errDiv = document.createElement('div');
+    errDiv.className = 'chat-msg bot';
+    errDiv.style.color = '#d9534f';
+    errDiv.textContent = 'Error: ' + e.message;
+    history.appendChild(errDiv);
+  } finally {
+    // 5. Unlock input
+    input.disabled = false;
+    $('chat-btn').disabled = false;
+    $('chat-btn').textContent = 'Ask';
+    history.scrollTop = history.scrollHeight;
+    input.focus();
+  }
+});
+
+// Trigger the "Ask" button when the user presses Enter
+$('chat-input').addEventListener('keypress', e => {
+  if (e.key === 'Enter') $('chat-btn').click();
+});
 
 /* ═══════════════════════════════════════════════
    Initialization
