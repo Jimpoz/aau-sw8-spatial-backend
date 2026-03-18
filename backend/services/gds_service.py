@@ -27,17 +27,20 @@ class GdsService:
             pass
 
     def create_projection(self, name: str = _PROJECTION_NAME) -> bool:
-        """Project navigable Space nodes and CONNECTS_TO relationships into GDS."""
+        """Project navigable Space nodes and CONNECTS_TO relationships into GDS.
+
+        Uses Cypher projection to derive edge weight from target node's traversal_cost.
+        """
         try:
             self.db.execute_write(
                 """
-                CALL gds.graph.project(
+                CALL gds.graph.project.cypher(
                     $name,
-                    {Space: {properties: ['is_navigable']}},
-                    {CONNECTS_TO: {
-                        orientation: 'NATURAL',
-                        properties: ['weight', 'is_accessible']
-                    }}
+                    'MATCH (s:Space) WHERE s.is_navigable = true RETURN id(s) AS id',
+                    'MATCH (s:Space)-[:CONNECTS_TO]->(t:Space)
+                     WHERE s.is_navigable = true AND t.is_navigable = true
+                     RETURN id(s) AS source, id(t) AS target,
+                            coalesce(t.traversal_cost, 1.0) AS weight'
                 )
                 YIELD graphName
                 RETURN graphName

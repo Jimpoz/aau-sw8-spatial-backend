@@ -114,21 +114,78 @@ class SpaceRepository:
         )
         return [_from_neo4j(r["s"]) for r in result]
 
+    def get_floor_spaces_with_subspaces(self, floor_id: str) -> list[dict]:
+        """Return top-level spaces with recursively nested subspaces for export."""
+        top_result = self.db.execute(
+            "MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space) RETURN s",
+            {"floor_id": floor_id},
+        )
+        sub_result = self.db.execute(
+            """
+            MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(root:Space)
+            MATCH (root)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            MATCH (parent:Space)-[:HAS_SUBSPACE]->(sub)
+            RETURN parent.id AS parent_id, sub
+            """,
+            {"floor_id": floor_id},
+        )
+        children_map: dict[str, list[dict]] = {}
+        for r in sub_result:
+            child = _from_neo4j(r["sub"])
+            children_map.setdefault(r["parent_id"], []).append(child)
+
+        def attach_subspaces(space: dict) -> dict:
+            space["subspaces"] = children_map.get(space["id"], [])
+            for child in space["subspaces"]:
+                attach_subspaces(child)
+            return space
+
+        return [attach_subspaces(_from_neo4j(r["s"])) for r in top_result]
+
     def get_floor_display(self, floor_id: str) -> list[dict]:
-        """Return all top-level spaces with nested subspaces for rendering."""
+        """Return all spaces with z_index for rendering, including subspaces and connection nodes."""
+        # Top-level spaces and their subspaces with depth
         result = self.db.execute(
             """
             MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space)
-            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
-            RETURN s, collect(sub) AS subspaces
+            OPTIONAL MATCH path = (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            RETURN s, collect({node: sub, depth: length(path)}) AS subspaces_with_depth
             """,
             {"floor_id": floor_id},
         )
         spaces = []
+        max_depth = 0
         for r in result:
             space = _from_neo4j(r["s"])
-            space["subspaces"] = [_from_neo4j(sub) for sub in r["subspaces"] if sub]
+            space["z_index"] = 0
+            space["subspaces"] = []
+            for item in r["subspaces_with_depth"]:
+                if item["node"] is not None:
+                    sub = _from_neo4j(item["node"])
+                    depth = item["depth"]
+                    sub["z_index"] = depth
+                    if depth > max_depth:
+                        max_depth = depth
+                    space["subspaces"].append(sub)
             spaces.append(space)
+
+        # Connection nodes (doors/passages) connected to spaces on this floor
+        conn_types = ["DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE"]
+        conn_result = self.db.execute(
+            """
+            MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space)-[:CONNECTS_TO]-(conn:Space)
+            WHERE conn.space_type IN $conn_types
+            RETURN DISTINCT conn
+            """,
+            {"floor_id": floor_id, "conn_types": conn_types},
+        )
+        conn_z = max_depth + 1
+        for r in conn_result:
+            node = _from_neo4j(r["conn"])
+            node["z_index"] = conn_z
+            node["subspaces"] = []
+            spaces.append(node)
+
         return spaces
 
     def search(self, campus_id: str, query: str) -> list[dict]:
@@ -137,6 +194,8 @@ class SpaceRepository:
             CALL db.index.fulltext.queryNodes('space_search_idx', $query)
             YIELD node, score
             WHERE node.campus_id = $campus_id AND node.is_navigable = true
+                AND NOT node.space_type STARTS WITH 'DOOR_'
+                AND node.space_type <> 'PASSAGE'
             RETURN node AS s, score
             ORDER BY score DESC
             LIMIT 20

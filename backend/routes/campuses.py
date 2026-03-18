@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from db import Database, get_db
-from core.exceptions import CampusNotFound, MapImportError
+from core.exceptions import CampusNotFound
 from models.campus import CampusCreate, Campus
 from models.map_import import MapImportSchema
 from repositories.campus_repo import CampusRepository
@@ -66,15 +66,42 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
     for building in campus_repo.list_buildings(campus_id):
         floors_out = []
         for floor in campus_repo.list_floors(building["id"]):
-            spaces_out = space_repo.get_floor_spaces(floor["id"])
+            spaces_out = space_repo.get_floor_spaces_with_subspaces(floor["id"])
             floors_out.append({**floor, "spaces": spaces_out})
         buildings_out.append({**building, "floors": floors_out})
+
+    # Export connection nodes (doors/passages) with their connected spaces
+    conn_types = ["DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE"]
+    conn_result = db.execute(
+        """
+        MATCH (conn:Space {campus_id: $campus_id})
+        WHERE conn.space_type IN $conn_types
+        OPTIONAL MATCH (conn)-[:CONNECTS_TO]->(neighbor:Space)
+        WHERE NOT neighbor.space_type IN $conn_types
+        RETURN conn, collect(DISTINCT neighbor.id) AS connected_ids
+        """,
+        {"campus_id": campus_id, "conn_types": conn_types},
+    )
+    connections_out = []
+    for row in conn_result:
+        node = row["conn"]
+        connections_out.append({
+            "id": node.get("id"),
+            "display_name": node.get("display_name", "Door"),
+            "space_type": node.get("space_type"),
+            "connects": row["connected_ids"],
+            "centroid_x": node.get("centroid_x"),
+            "centroid_y": node.get("centroid_y"),
+            "is_accessible": node.get("is_accessible", True),
+            "tags": node.get("tags", []),
+        })
 
     return {
         "schema_version": "1.0",
         "campus": {
             **campus,
             "buildings": buildings_out,
+            "connections": connections_out,
         },
     }
 

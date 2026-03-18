@@ -251,22 +251,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <div id="connect-form" style="display:none">
       <label for="new-conn-type">Connection Type</label>
       <select id="new-conn-type">
-        <option value="DOORWAY">Doorway</option>
-        <option value="WALKWAY">Walkway</option>
-        <option value="STAIRCASE_UP">Staircase Up</option>
-        <option value="STAIRCASE_DOWN">Staircase Down</option>
-        <option value="ELEVATOR_UP">Elevator Up</option>
-        <option value="ELEVATOR_DOWN">Elevator Down</option>
-        <option value="RAMP_UP">Ramp Up</option>
-        <option value="RAMP_DOWN">Ramp Down</option>
-        <option value="OUTDOOR_PATH">Outdoor Path</option>
-        <option value="BRIDGE">Bridge</option>
-        <option value="TUNNEL">Tunnel</option>
+        <option value="DOOR_STANDARD">Door (Standard)</option>
+        <option value="DOOR_AUTOMATIC">Door (Automatic)</option>
+        <option value="DOOR_LOCKED">Door (Locked)</option>
+        <option value="DOOR_EMERGENCY">Door (Emergency)</option>
+        <option value="PASSAGE">Passage</option>
       </select>
-      <div class="checkbox-row">
-        <input type="checkbox" id="new-conn-bidir" checked>
-        <label for="new-conn-bidir">Bidirectional</label>
-      </div>
       <div class="checkbox-row">
         <input type="checkbox" id="new-conn-accessible" checked>
         <label for="new-conn-accessible">Accessible</label>
@@ -427,6 +417,9 @@ const COLORS = {
   CAFETERIA:'#FFEB99', CAFE:'#FFEB99', LIBRARY:'#FFEB99',
   GYM:'#FFEB99', AUDITORIUM:'#FFEB99', SHOP:'#FFEB99',
   INACCESSIBLE:'#808080', UNKNOWN:'#F0F0F0',
+  DOOR_STANDARD:'#D4A574', DOOR_AUTOMATIC:'#C9976A',
+  DOOR_LOCKED:'#BF8A60', DOOR_EMERGENCY:'#FF9999',
+  PASSAGE:'#E8D5C0',
 };
 
 /* ═══════════════════════════════════════════════
@@ -643,7 +636,34 @@ function render() {
 
   // Draw spaces
   for (const space of state.spaces) {
-    if (!space.polygon || space.polygon.length < 3) continue;
+    const isConnType = space.space_type && (
+      space.space_type.startsWith('DOOR_') || space.space_type === 'PASSAGE'
+    );
+
+    if (!space.polygon || space.polygon.length < 3) {
+      // Draw connection nodes (doors/passages) as small rectangles at centroid
+      if (isConnType && space.centroid_x != null && space.centroid_y != null) {
+        const [cx, cy] = worldToCanvas(space.centroid_x, space.centroid_y);
+        const size = Math.max(4, effScale * 0.6);
+        const fill = COLORS[space.space_type] || '#D4A574';
+        ctx.save();
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = '#999';
+        ctx.lineWidth = 0.5;
+        ctx.fillRect(cx - size, cy - size/2, size * 2, size);
+        ctx.strokeRect(cx - size, cy - size/2, size * 2, size);
+        if (showLabels) {
+          const fontSize = Math.min(10, Math.max(7, effScale * 0.5));
+          ctx.font = `${fontSize}px -apple-system, sans-serif`;
+          ctx.fillStyle = '#666';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(space.display_name || '', cx, cy + size/2 + 2);
+        }
+        ctx.restore();
+      }
+      continue;
+    }
 
     const isHovered = state.hoveredSpace && state.hoveredSpace.id === space.id;
     const isConnectFrom = state.mode === 'connect' && state.connectFrom && state.connectFrom.id === space.id;
@@ -651,7 +671,8 @@ function render() {
     let fill = COLORS[space.space_type] || '#F0F0F0';
     if (isHovered) fill = blendColor(fill, '#000000', 0.1);
 
-    drawPolygon(space.polygon, fill, '#999', 0.5);
+    const isSubspace = (space.z_index || 0) > 0;
+    drawPolygon(space.polygon, fill, isSubspace ? '#666' : '#999', isSubspace ? 1.0 : 0.5);
 
     if (isConnectFrom) drawPolygon(space.polygon, null, '#ff9500', 3);
 
@@ -767,6 +788,18 @@ function pointInPolygon(px, py, polygon) {
 
 function hitTest(canvasX, canvasY) {
   const [wx, wy] = canvasToWorld(canvasX, canvasY);
+  // Check door/passage nodes by centroid proximity
+  for (let i = state.spaces.length - 1; i >= 0; i--) {
+    const s = state.spaces[i];
+    if ((!s.polygon || s.polygon.length < 3) &&
+        s.space_type && (s.space_type.startsWith('DOOR_') || s.space_type === 'PASSAGE') &&
+        s.centroid_x != null && s.centroid_y != null) {
+      const dx = Math.abs(wx - s.centroid_x);
+      const dy = Math.abs(wy - s.centroid_y);
+      if (dx < 1.5 && dy < 1.0) return s;
+    }
+  }
+  // Existing polygon hit test
   for (let i = state.spaces.length - 1; i >= 0; i--) {
     const s = state.spaces[i];
     if (!s.polygon || s.polygon.length < 3) continue;
@@ -801,15 +834,20 @@ canvas.addEventListener('mousemove', e => {
   // Move mode: update space position with snapping
   if (state.mode === 'moveSpace' && state.moveSpace) {
     const [rawWx, rawWy] = canvasToWorld(mx, my);
-    const origBB = getSpaceBBox({ polygon: state.moveOrigPoly });
-    const halfW = (origBB.maxX - origBB.minX) / 2;
-    const halfH = (origBB.maxY - origBB.minY) / 2;
-    const [sx, sy] = applySnap(rawWx, rawWy, halfW, halfH, state.moveSpace.id);
-    const dx = sx - state.moveOrigCentroid[0];
-    const dy = sy - state.moveOrigCentroid[1];
-    state.moveSpace.polygon = state.moveOrigPoly.map(([px, py]) => [px + dx, py + dy]);
-    state.moveSpace.centroid_x = sx;
-    state.moveSpace.centroid_y = sy;
+    if (state.moveOrigPoly) {
+      const origBB = getSpaceBBox({ polygon: state.moveOrigPoly });
+      const halfW = (origBB.maxX - origBB.minX) / 2;
+      const halfH = (origBB.maxY - origBB.minY) / 2;
+      const [sx, sy] = applySnap(rawWx, rawWy, halfW, halfH, state.moveSpace.id);
+      const dx = sx - state.moveOrigCentroid[0];
+      const dy = sy - state.moveOrigCentroid[1];
+      state.moveSpace.polygon = state.moveOrigPoly.map(([px, py]) => [px + dx, py + dy]);
+      state.moveSpace.centroid_x = sx;
+      state.moveSpace.centroid_y = sy;
+    } else {
+      state.moveSpace.centroid_x = rawWx;
+      state.moveSpace.centroid_y = rawWy;
+    }
     render();
     return;
   }
@@ -1021,14 +1059,17 @@ async function loadFloorConnections(floorId) {
   }
 }
 
-function flattenSpaces(spaces) {
+function flattenSpaces(spaces, depth) {
+  depth = depth || 0;
   const result = [];
   for (const s of spaces) {
+    if (s.z_index == null) s.z_index = depth;
     result.push(s);
     if (s.subspaces && s.subspaces.length) {
-      result.push(...flattenSpaces(s.subspaces));
+      result.push(...flattenSpaces(s.subspaces, depth + 1));
     }
   }
+  if (depth === 0) result.sort((a, b) => (a.z_index || 0) - (b.z_index || 0));
   return result;
 }
 
@@ -1383,11 +1424,23 @@ async function handleAddSpaceClick(canvasX, canvasY) {
   const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
   state.snapLines = [];
 
+  // Auto-detect parent: find the most nested space containing the click point
+  let parentSpaceId = null;
+  let bestZIndex = -1;
+  for (const s of state.spaces) {
+    if (!s.polygon || s.polygon.length < 3) continue;
+    if (pointInPolygon(wx, wy, s.polygon) && (s.z_index || 0) > bestZIndex) {
+      parentSpaceId = s.id;
+      bestZIndex = s.z_index || 0;
+    }
+  }
+
   const spaceData = {
     id: uuid(),
     display_name: name,
     space_type: $('new-space-type').value,
     floor_id: state.selectedFloorId,
+    parent_space_id: parentSpaceId,
     building_id: state.selectedBuildingId,
     campus_id: state.selectedCampusId,
     floor_index: state.currentFloorIndex,
@@ -1438,25 +1491,16 @@ async function handleConnectClick(canvasX, canvasY) {
     return;
   }
 
-  const connType = $('new-conn-type').value;
-  const bidir = $('new-conn-bidir').checked;
+  const spaceType = $('new-conn-type').value;
   const accessible = $('new-conn-accessible').checked;
   const from = state.connectFrom;
-
-  const dist = Math.sqrt(
-    Math.pow((space.centroid_x || 0) - (from.centroid_x || 0), 2) +
-    Math.pow((space.centroid_y || 0) - (from.centroid_y || 0), 2)
-  );
-  const weight = dist / 1.4;
 
   const connData = {
     from_space_id: from.id,
     to_space_id: space.id,
-    connection_type: connType,
-    weight: weight,
-    distance_m: dist,
+    space_type: spaceType,
+    display_name: spaceType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
     is_accessible: accessible,
-    door_type: 'NONE',
   };
 
   try {
@@ -1466,37 +1510,17 @@ async function handleConnectClick(canvasX, canvasY) {
       body: JSON.stringify(connData),
     });
 
-    if (bidir) {
-      const reverseType = getReverse(connType);
-      await api('/connections', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...connData, from_space_id: space.id, to_space_id: from.id, connection_type: reverseType }),
-      });
-    }
-
     notify(`Connected "${from.display_name}" to "${space.display_name}"`);
     state.connectFrom = null;
     $('connect-status').textContent = 'Click the first space (start), then click the second space (end).';
     $('connect-status').className = 'tool-hint';
 
-    // Refresh connections
-    if (state.selectedFloorId) await loadFloorConnections(state.selectedFloorId);
-    render();
+    // Refresh floor display (door nodes appear as spaces now)
+    await reloadCurrentFloor();
 
     // Refresh GDS projection
     api('/navigate/refresh-graph', { method: 'POST' }).catch(() => {});
   } catch (e) { /* handled */ }
-}
-
-function getReverse(connType) {
-  const map = {
-    STAIRCASE_UP: 'STAIRCASE_DOWN', STAIRCASE_DOWN: 'STAIRCASE_UP',
-    ELEVATOR_UP: 'ELEVATOR_DOWN', ELEVATOR_DOWN: 'ELEVATOR_UP',
-    ESCALATOR_UP: 'ESCALATOR_DOWN', ESCALATOR_DOWN: 'ESCALATOR_UP',
-    RAMP_UP: 'RAMP_DOWN', RAMP_DOWN: 'RAMP_UP',
-  };
-  return map[connType] || connType;
 }
 
 /* ═══════════════════════════════════════════════
@@ -1636,7 +1660,7 @@ $('info-overlay').addEventListener('click', e => {
 function startMoveMode(space) {
   state.mode = 'moveSpace';
   state.moveSpace = space;
-  state.moveOrigPoly = space.polygon.map(p => [...p]);
+  state.moveOrigPoly = space.polygon ? space.polygon.map(p => [...p]) : null;
   state.moveOrigCentroid = [space.centroid_x, space.centroid_y];
   canvas.classList.add('crosshair');
   for (const btn of document.querySelectorAll('.tool-bar button')) {
@@ -1651,18 +1675,16 @@ async function finishMove() {
   if (!space) return;
   state.snapLines = [];
   try {
+    const body = { centroid_x: space.centroid_x, centroid_y: space.centroid_y };
+    if (space.polygon) body.polygon = space.polygon;
     await api(`/spaces/${space.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        polygon: space.polygon,
-        centroid_x: space.centroid_x,
-        centroid_y: space.centroid_y,
-      }),
+      body: JSON.stringify(body),
     });
     notify(`Moved "${space.display_name}"`);
   } catch (e) {
-    space.polygon = state.moveOrigPoly;
+    if (state.moveOrigPoly) space.polygon = state.moveOrigPoly;
     space.centroid_x = state.moveOrigCentroid[0];
     space.centroid_y = state.moveOrigCentroid[1];
   }

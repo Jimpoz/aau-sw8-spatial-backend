@@ -35,38 +35,67 @@ def area_from_polygon(polygon: list[list[float]]) -> float:
     return abs(area) / 2.0
 
 
+def find_shared_edge_midpoint(
+    poly_a: list[list[float]], poly_b: list[list[float]]
+) -> Optional[tuple[float, float]]:
+    """Return the midpoint of the shared boundary between two polygons.
+
+    Falls back to the midpoint of the closest points if no shared edge exists.
+    Returns None if Shapely is not available.
+    """
+    if not _SHAPELY:
+        return None
+    from shapely.ops import nearest_points
+
+    a = ShapelyPolygon(poly_a)
+    b = ShapelyPolygon(poly_b)
+    shared = a.boundary.intersection(b.boundary)
+    if not shared.is_empty:
+        c = shared.centroid
+        return (c.x, c.y)
+    # Fallback: midpoint between closest points on the two polygons
+    p1, p2 = nearest_points(a, b)
+    return ((p1.x + p2.x) / 2, (p1.y + p2.y) / 2)
+
+
 def distance_m(cx1: float, cy1: float, cx2: float, cy2: float) -> float:
     """Euclidean distance between two points in the local coordinate system (meters)."""
     return math.sqrt((cx2 - cx1) ** 2 + (cy2 - cy1) ** 2)
 
 
-# Walking speeds in m/s for weight computation
-_SPEEDS = {
-    "WALKWAY": 1.4,
-    "DOORWAY": 1.4,
-    "OUTDOOR_PATH": 1.4,
-    "BRIDGE": 1.4,
-    "TUNNEL": 1.4,
-    "COVERED_WALKWAY": 1.4,
-    "STAIRCASE_UP": 0.5,
-    "STAIRCASE_DOWN": 0.7,
-    "RAMP_UP": 0.7,
-    "RAMP_DOWN": 0.9,
-    "ESCALATOR_UP": 0.8,
-    "ESCALATOR_DOWN": 0.8,
-}
-_ELEVATOR_DEFAULT_S = 30.0  # seconds for elevator transition when no override given
+_WALKING_SPEED = 1.4  # m/s
 
 
-def compute_weight(
-    connection_type: str,
-    dist: Optional[float],
+def compute_traversal_cost(
+    space_type: str,
+    width_m: Optional[float],
+    length_m: Optional[float],
     transition_time_s: Optional[float],
 ) -> float:
-    """Return traversal cost in walking-second equivalents."""
-    ct = connection_type.upper()
-    if ct in ("ELEVATOR_UP", "ELEVATOR_DOWN"):
-        return transition_time_s if transition_time_s is not None else _ELEVATOR_DEFAULT_S
-    speed = _SPEEDS.get(ct, 1.4)
-    d = dist if dist is not None else 1.0
-    return d / speed
+    """Return traversal cost in seconds for a Space node."""
+    st = space_type.upper()
+
+    # Connection node types — small fixed costs
+    if st == "DOOR_STANDARD":
+        return 1.0
+    if st == "DOOR_AUTOMATIC":
+        return 0.5
+    if st == "DOOR_LOCKED":
+        return 5.0
+    if st == "DOOR_EMERGENCY":
+        return 2.0
+    if st == "PASSAGE":
+        return 0.5
+
+    # Vertical transport
+    if st == "ELEVATOR":
+        return transition_time_s or 30.0
+    if st == "STAIRCASE":
+        return transition_time_s or 15.0
+
+    # Rooms/corridors — half-diagonal at walking speed
+    if width_m is not None and length_m is not None and (width_m > 0 or length_m > 0):
+        half_diag = math.sqrt(width_m ** 2 + length_m ** 2) / 2.0
+        return half_diag / _WALKING_SPEED
+
+    return 1.0  # default if no dimensions

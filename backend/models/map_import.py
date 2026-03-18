@@ -1,6 +1,6 @@
 from typing import Optional
 from pydantic import BaseModel
-from models.enums import ConnectionType, DoorType, SpaceType
+from models.enums import SpaceType
 
 
 class SpaceImport(BaseModel):
@@ -50,15 +50,17 @@ class BuildingImport(BaseModel):
     floors: list[FloorImport] = []
 
 
-class ConnectionImport(BaseModel):
-    from_space_id: str
-    to_space_id: str
-    connection_type: ConnectionType
+class ConnectionNodeImport(BaseModel):
+    id: str
+    display_name: str = "Door"
+    space_type: SpaceType = SpaceType.DOOR_STANDARD
+    connects: list[str]  # exactly 2 space IDs
+    centroid_x: Optional[float] = None
+    centroid_y: Optional[float] = None
+    polygon: Optional[list[list[float]]] = None
     is_accessible: bool = True
-    door_type: DoorType = DoorType.NONE
-    requires_access_level: Optional[str] = None
+    tags: list[str] = []
     transition_time_s: Optional[float] = None
-    weight_override: Optional[float] = None
 
 
 class CampusImport(BaseModel):
@@ -67,7 +69,7 @@ class CampusImport(BaseModel):
     description: Optional[str] = None
     buildings: list[BuildingImport] = []
     outdoor_spaces: list[SpaceImport] = []
-    connections: list[ConnectionImport] = []
+    connections: list[ConnectionNodeImport] = []
 
 
 class MapImportSchema(BaseModel):
