@@ -149,7 +149,8 @@ class SpaceRepository:
             """
             MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space)
             OPTIONAL MATCH path = (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
-            RETURN s, collect({node: sub, depth: length(path)}) AS subspaces_with_depth
+            OPTIONAL MATCH (directParent:Space)-[:HAS_SUBSPACE]->(sub)
+            RETURN s, collect({node: sub, depth: length(path), parent_id: directParent.id, parent_name: directParent.display_name}) AS subspaces_with_depth
             """,
             {"floor_id": floor_id},
         )
@@ -164,6 +165,8 @@ class SpaceRepository:
                     sub = _from_neo4j(item["node"])
                     depth = item["depth"]
                     sub["z_index"] = depth
+                    sub["parent_space_id"] = item["parent_id"]
+                    sub["parent_space_name"] = item["parent_name"]
                     if depth > max_depth:
                         max_depth = depth
                     space["subspaces"].append(sub)

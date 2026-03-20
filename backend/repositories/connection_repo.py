@@ -37,17 +37,47 @@ class ConnectionRepository:
         )
         return result[0]["deleted"] > 0 if result else False
 
+    _CONN_TYPES = [
+        "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY",
+        "PASSAGE", "OPEN", "STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP",
+    ]
+
     def list_connections_for_space(self, space_id: str) -> list[dict]:
-        result = self.db.execute(
-            """
-            MATCH (a:Space {id: $id})-[:CONNECTS_TO]->(b:Space)
-            RETURN b.id AS other_space_id, b.display_name AS other_space_name, 'outgoing' AS direction
-            UNION
-            MATCH (a:Space)-[:CONNECTS_TO]->(b:Space {id: $id})
-            RETURN a.id AS other_space_id, a.display_name AS other_space_name, 'incoming' AS direction
-            """,
+        # Determine if this space is itself a connection node
+        type_result = self.db.execute(
+            "MATCH (s:Space {id: $id}) RETURN s.space_type AS space_type",
             {"id": space_id},
         )
+        if not type_result:
+            return []
+
+        space_type = type_result[0]["space_type"]
+
+        if space_type in self._CONN_TYPES:
+            # This IS a door/connection node — return the spaces it bridges
+            result = self.db.execute(
+                """
+                MATCH (dest:Space)-[:CONNECTS_TO]->(s:Space {id: $id})
+                WHERE NOT dest.space_type IN $conn_types
+                RETURN DISTINCT dest.id AS other_space_id, dest.display_name AS other_space_name,
+                       s.id AS door_node_id, s.space_type AS door_type,
+                       s.is_accessible AS door_accessible, s.display_name AS door_name
+                """,
+                {"id": space_id, "conn_types": self._CONN_TYPES},
+            )
+        else:
+            # Regular space — traverse through door nodes to find destinations
+            result = self.db.execute(
+                """
+                MATCH (s:Space {id: $id})-[:CONNECTS_TO]->(door:Space)-[:CONNECTS_TO]->(dest:Space)
+                WHERE door.space_type IN $conn_types AND dest.id <> $id
+                RETURN DISTINCT dest.id AS other_space_id, dest.display_name AS other_space_name,
+                       door.id AS door_node_id, door.space_type AS door_type,
+                       door.is_accessible AS door_accessible, door.display_name AS door_name
+                """,
+                {"id": space_id, "conn_types": self._CONN_TYPES},
+            )
+
         return [dict(row) for row in result]
 
     def list_connections_for_floor(self, floor_id: str) -> list[dict]:

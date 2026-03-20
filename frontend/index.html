@@ -134,7 +134,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .info-grid .val { font-weight: 500; }
 .info-grid input.val-input { font-size: 13px; padding: 4px 6px; margin-bottom: 0; width: 100%; }
 .conn-list { max-height: 180px; overflow-y: auto; font-size: 13px; }
-.conn-item { padding: 4px 0; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 6px; }
+.conn-item { padding: 6px 0; border-bottom: 1px solid #f0f0f0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.conn-item .conn-controls { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 4px; }
+.conn-item select { font-size: 12px; padding: 2px 4px; border: 1px solid #ddd; border-radius: 4px; background: #fafafa; }
+.conn-item label { font-size: 12px; color: #555; display: flex; align-items: center; gap: 4px; }
+.conn-item label input[type="checkbox"] { width: auto; margin: 0; }
+#info-accessible { width: auto; }
+.parent-link, .subspace-link { color: #4a90d9; text-decoration: none; cursor: pointer; }
+.parent-link:hover, .subspace-link:hover { text-decoration: underline; }
+#info-subspaces h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: 8px; margin-top: 14px; }
+.subspace-item { padding: 4px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
 .conn-dir { font-size: 16px; flex-shrink: 0; }
 #chat-history {
   max-height: 250px; overflow-y: auto; margin-bottom: 10px;
@@ -220,9 +229,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         </optgroup>
         <optgroup label="Vertical">
           <option value="STAIRCASE">Staircase</option>
-          <option value="STAIRCASE_LANDING">Staircase Landing</option>
           <option value="ELEVATOR">Elevator</option>
-          <option value="ELEVATOR_LOBBY">Elevator Lobby</option>
           <option value="ESCALATOR">Escalator</option>
           <option value="RAMP">Ramp</option>
         </optgroup>
@@ -256,6 +263,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <option value="DOOR_LOCKED">Door (Locked)</option>
         <option value="DOOR_EMERGENCY">Door (Emergency)</option>
         <option value="PASSAGE">Passage</option>
+        <option value="OPEN">Open</option>
+        <option value="STAIRCASE">Staircase</option>
+        <option value="ELEVATOR">Elevator</option>
+        <option value="ESCALATOR">Escalator</option>
+        <option value="RAMP">Ramp</option>
       </select>
       <div class="checkbox-row">
         <input type="checkbox" id="new-conn-accessible" checked>
@@ -342,11 +354,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 </div>
 
 <div id="info-overlay" class="modal-overlay" style="display:none">
-  <div class="modal" style="width:440px">
+  <div class="modal" style="width:440px;max-height:80vh;overflow-y:auto">
     <h2 id="info-title">Space Info</h2>
+    <div id="info-parent"></div>
     <div class="info-grid" id="info-grid"></div>
     <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px">Connections</h3>
     <div class="conn-list" id="info-connections"></div>
+    <div id="info-subspaces"></div>
     <div class="modal-buttons" style="margin-top:14px">
       <button class="btn-primary" id="info-save">Save</button>
       <button class="btn-secondary" id="info-close">Close</button>
@@ -375,12 +389,15 @@ const state = {
   currentBuildingId: null,
   hoveredSpace: null,
   // Edit mode
-  mode: 'select',      // 'select' | 'addSpace' | 'connect' | 'moveSpace'
+  mode: 'select',      // 'select' | 'addSpace' | 'connect' | 'moveSpace' | 'placeDuplicate'
   connectFrom: null,
   // Move mode
   moveSpace: null,
   moveOrigPoly: null,
   moveOrigCentroid: null,
+  // Duplicate placement mode
+  pendingDuplicate: null,
+  pendingDupOrigPoly: null,
   // Context menu
   contextMenu: null,
   // Snap indicators
@@ -407,8 +424,8 @@ const COLORS = {
   CORRIDOR:'#E0E0E0', CORRIDOR_SEGMENT:'#E0E0E0',
   LOBBY:'#D8D8D8', WAITING_AREA:'#D8D8D8', RECEPTION:'#D8D8D8',
   ENTRANCE:'#90EE90', ENTRANCE_SECONDARY:'#A8F0A8', EXIT_EMERGENCY:'#FFB3B3',
-  STAIRCASE:'#FFD699', STAIRCASE_LANDING:'#FFD699',
-  ELEVATOR:'#FFCC80', ELEVATOR_LOBBY:'#FFCC80',
+  STAIRCASE:'#FFD699',
+  ELEVATOR:'#FFCC80',
   ESCALATOR:'#FFD699', RAMP:'#FFD699',
   BRIDGE:'#FFD699', TUNNEL:'#D0D0D0', COVERED_WALKWAY:'#D8E8D8',
   OUTDOOR_PATH:'#C8F0C8', OUTDOOR_PLAZA:'#C8F0C8',
@@ -420,7 +437,25 @@ const COLORS = {
   DOOR_STANDARD:'#D4A574', DOOR_AUTOMATIC:'#C9976A',
   DOOR_LOCKED:'#BF8A60', DOOR_EMERGENCY:'#FF9999',
   PASSAGE:'#E8D5C0',
+  OPEN:'#E0E0E0',
 };
+
+const SPACE_TYPES = [
+  'ROOM_GENERIC','ROOM_OFFICE','ROOM_CLASSROOM','ROOM_LECTURE_HALL','ROOM_LAB',
+  'ROOM_MEETING','ROOM_STORAGE','ROOM_UTILITY','RESTROOM','RESTROOM_ACCESSIBLE',
+  'CORRIDOR','CORRIDOR_SEGMENT','LOBBY','WAITING_AREA','RECEPTION',
+  'ENTRANCE','ENTRANCE_SECONDARY','EXIT_EMERGENCY',
+  'STAIRCASE','ELEVATOR','ESCALATOR','RAMP',
+  'BRIDGE','TUNNEL','COVERED_WALKWAY',
+  'OUTDOOR_PATH','OUTDOOR_PLAZA','OUTDOOR_COURTYARD','OUTDOOR_STAIRS','PARKING',
+  'CAFETERIA','CAFE','LIBRARY','GYM','AUDITORIUM','SHOP',
+  'DOOR_STANDARD','DOOR_AUTOMATIC','DOOR_LOCKED','DOOR_EMERGENCY','PASSAGE','OPEN',
+  'INACCESSIBLE','UNKNOWN',
+];
+const CONN_SPACE_TYPES = [
+  'DOOR_STANDARD','DOOR_AUTOMATIC','DOOR_LOCKED','DOOR_EMERGENCY',
+  'PASSAGE','OPEN','STAIRCASE','ELEVATOR','ESCALATOR','RAMP',
+];
 
 /* ═══════════════════════════════════════════════
    DOM References
@@ -637,7 +672,7 @@ function render() {
   // Draw spaces
   for (const space of state.spaces) {
     const isConnType = space.space_type && (
-      space.space_type.startsWith('DOOR_') || space.space_type === 'PASSAGE'
+      space.space_type.startsWith('DOOR_') || space.space_type === 'PASSAGE' || space.space_type === 'OPEN'
     );
 
     if (!space.polygon || space.polygon.length < 3) {
@@ -689,6 +724,28 @@ function render() {
       const maxW = effScale * 3;
       ctx.fillText(name.length > 20 ? name.slice(0, 18) + '..' : name, lx, ly, maxW);
       ctx.restore();
+    }
+
+    // Vertical connection indicators
+    if (effScale > 1 && space.vertical_connections && space.vertical_connections.length > 0 && state.currentFloorIndex != null) {
+      const vc = space.vertical_connections;
+      const hasUp = vc.some(c => c.to_floor_index > state.currentFloorIndex);
+      const hasDown = vc.some(c => c.to_floor_index < state.currentFloorIndex);
+      if (hasUp || hasDown) {
+        // Compute bounding box top-right from polygon
+        let maxX = -Infinity, minY = Infinity;
+        for (const pt of space.polygon) { if (pt[0] > maxX) maxX = pt[0]; if (pt[1] < minY) minY = pt[1]; }
+        const [bx, by] = worldToCanvas(maxX, minY);
+        const label = (hasUp && hasDown) ? '\u25B2\u25BC' : hasUp ? '\u25B2' : '\u25BC';
+        const fs = Math.min(12, Math.max(8, effScale * 0.7));
+        ctx.save();
+        ctx.font = `bold ${fs}px sans-serif`;
+        ctx.fillStyle = '#FF6B00';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(label, bx - 2, by + 2);
+        ctx.restore();
+      }
     }
   }
 
@@ -852,6 +909,27 @@ canvas.addEventListener('mousemove', e => {
     return;
   }
 
+  // Duplicate placement mode: ghost polygon follows cursor
+  if (state.mode === 'placeDuplicate' && state.pendingDuplicate) {
+    const [rawWx, rawWy] = canvasToWorld(mx, my);
+    const relPoly = state.pendingDupOrigPoly;
+    const bb = getSpaceBBox({ polygon: relPoly.map(([rx, ry]) => [rx + rawWx, ry + rawWy]) });
+    const halfW = (bb.maxX - bb.minX) / 2;
+    const halfH = (bb.maxY - bb.minY) / 2;
+    const [sx, sy] = applySnap(rawWx, rawWy, halfW, halfH, null);
+    state.pendingDuplicate.centroid_x = sx;
+    state.pendingDuplicate.centroid_y = sy;
+    state.pendingDuplicate.polygon = relPoly.map(([rx, ry]) => [rx + sx, ry + sy]);
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
+    tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
+    tooltip.textContent = `${sx.toFixed(1)}, ${sy.toFixed(1)} m`;
+    render();
+    const color = COLORS[state.pendingDuplicate.space_type] || '#F0F0F0';
+    drawPolygon(state.pendingDuplicate.polygon, blendColor(color, '#ffffff', 0.4), '#4a90d9', 2);
+    return;
+  }
+
   const space = hitTest(mx, my);
   if (space !== state.hoveredSpace) {
     state.hoveredSpace = space;
@@ -892,6 +970,12 @@ canvas.addEventListener('mouseup', e => {
   // Move mode: click to place
   if (state.mode === 'moveSpace' && state.moveSpace) {
     finishMove();
+    return;
+  }
+
+  // Duplicate placement mode: click to place
+  if (state.mode === 'placeDuplicate' && state.pendingDuplicate) {
+    finishDuplicatePlace();
     return;
   }
 
@@ -1064,6 +1148,9 @@ function flattenSpaces(spaces, depth) {
   const result = [];
   for (const s of spaces) {
     if (s.z_index == null) s.z_index = depth;
+    if (s.subspaces && s.subspaces.length) {
+      s.child_spaces = s.subspaces.map(sub => ({ id: sub.id, name: sub.display_name }));
+    }
     result.push(s);
     if (s.subspaces && s.subspaces.length) {
       result.push(...flattenSpaces(s.subspaces, depth + 1));
@@ -1579,16 +1666,34 @@ async function showInfoModal(space) {
   const spaceW = bb ? (bb.maxX - bb.minX).toFixed(2) : '0';
   const spaceH = bb ? (bb.maxY - bb.minY).toFixed(2) : '0';
 
+  const typeOptions = SPACE_TYPES.map(t =>
+    `<option value="${t}"${t === space.space_type ? ' selected' : ''}>${t.replace(/_/g, ' ')}</option>`
+  ).join('');
+
   grid.innerHTML = `
     <span class="lbl">Name</span><input class="val-input" id="info-name" value="${(space.display_name || '').replace(/"/g, '&quot;')}">
-    <span class="lbl">Type</span><span class="val">${(space.space_type || '').replace(/_/g, ' ')}</span>
+    <span class="lbl">Type</span><select class="val-input" id="info-type">${typeOptions}</select>
     <span class="lbl">Width (m)</span><input class="val-input" id="info-width" type="number" step="0.1" value="${spaceW}">
     <span class="lbl">Height (m)</span><input class="val-input" id="info-height" type="number" step="0.1" value="${spaceH}">
     <span class="lbl">X</span><input class="val-input" id="info-cx" type="number" step="0.1" value="${(space.centroid_x||0).toFixed(2)}">
     <span class="lbl">Y</span><input class="val-input" id="info-cy" type="number" step="0.1" value="${(space.centroid_y||0).toFixed(2)}">
-    <span class="lbl">Accessible</span><span class="val">${space.is_accessible ? 'Yes' : 'No'}</span>
+    <span class="lbl">Accessible</span><span class="val"><input type="checkbox" id="info-accessible" ${space.is_accessible ? 'checked' : ''}></span>
   `;
 
+  // Parent indicator
+  const parentDiv = $('info-parent');
+  if (space.parent_space_id) {
+    parentDiv.innerHTML = `<div style="margin-bottom:10px;padding:6px 10px;background:#f0f7ff;border-radius:6px;font-size:13px">Subspace of: <a href="#" class="parent-link" data-id="${space.parent_space_id}">${space.parent_space_name || space.parent_space_id}</a></div>`;
+    parentDiv.querySelector('.parent-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      const parent = state.spaces.find(s => s.id === space.parent_space_id);
+      if (parent) showInfoModal(parent);
+    });
+  } else {
+    parentDiv.innerHTML = '';
+  }
+
+  // Connections
   const connDiv = $('info-connections');
   connDiv.innerHTML = '<span style="color:#aaa">Loading...</span>';
   $('info-overlay').style.display = 'flex';
@@ -1598,16 +1703,42 @@ async function showInfoModal(space) {
     if (!conns.length) {
       connDiv.innerHTML = '<span style="color:#aaa">No connections</span>';
     } else {
-      connDiv.innerHTML = conns.map(c => `
-        <div class="conn-item">
-          <span class="conn-dir">${c.direction === 'outgoing' ? '&#8594;' : '&#8592;'}</span>
-          <span>${c.other_space_name || c.other_space_id}</span>
-          <span style="color:#999;margin-left:auto;font-size:11px">${(c.connection_type || '').replace(/_/g, ' ').toLowerCase()}</span>
-        </div>
-      `).join('');
+      connDiv.innerHTML = conns.map(c => {
+        const doorOpts = CONN_SPACE_TYPES.map(t =>
+          `<option value="${t}"${t === c.door_type ? ' selected' : ''}>${t.replace(/_/g, ' ')}</option>`
+        ).join('');
+        return `
+          <div class="conn-item">
+            <span class="conn-dir">&#8594;</span>
+            <span>${c.other_space_name || c.other_space_id}</span>
+            <div class="conn-controls">
+              <select class="conn-type-select" data-door-id="${c.door_node_id}">${doorOpts}</select>
+              <label><input type="checkbox" class="conn-accessible-check" data-door-id="${c.door_node_id}" ${c.door_accessible ? 'checked' : ''}> Accessible</label>
+            </div>
+          </div>
+        `;
+      }).join('');
     }
   } catch (e) {
     connDiv.innerHTML = '<span style="color:#d9534f">Failed to load connections</span>';
+  }
+
+  // Subspaces
+  const subDiv = $('info-subspaces');
+  if (space.child_spaces && space.child_spaces.length) {
+    subDiv.innerHTML = `<h3>Subspaces</h3>` +
+      space.child_spaces.map(cs =>
+        `<div class="subspace-item"><a href="#" class="subspace-link" data-id="${cs.id}">${cs.name || cs.id}</a></div>`
+      ).join('');
+    subDiv.querySelectorAll('.subspace-link').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const child = state.spaces.find(s => s.id === link.dataset.id);
+        if (child) showInfoModal(child);
+      });
+    });
+  } else {
+    subDiv.innerHTML = '';
   }
 }
 
@@ -1636,11 +1767,26 @@ $('info-save').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         display_name: newName,
+        space_type: $('info-type').value,
+        is_accessible: $('info-accessible').checked,
         centroid_x: newCx,
         centroid_y: newCy,
         polygon: newPoly,
       }),
     });
+
+    // Save connection (door node) edits
+    const connSaves = [...document.querySelectorAll('.conn-type-select')].map(sel => {
+      const doorId = sel.dataset.doorId;
+      const check = document.querySelector(`.conn-accessible-check[data-door-id="${doorId}"]`);
+      return api(`/spaces/${doorId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ space_type: sel.value, is_accessible: check?.checked ?? true }),
+      });
+    });
+    await Promise.all(connSaves);
+
     notify(`Updated "${newName}"`);
     $('info-overlay').style.display = 'none';
     await reloadCurrentFloor();
@@ -1715,14 +1861,12 @@ function exitMoveMode() {
 /* ═══════════════════════════════════════════════
    Duplicate Space
    ═══════════════════════════════════════════════ */
-async function duplicateSpace(space) {
-  const bb = getSpaceBBox(space);
-  if (!bb) return;
-  const bbW = bb.maxX - bb.minX;
-  const offset = gridSnap(bbW + 1);
-  const newPoly = space.polygon.map(([x, y]) => [x + offset, y]);
-  const newCx = (space.centroid_x || 0) + offset;
-  const newCy = space.centroid_y || 0;
+function duplicateSpace(space) {
+  const cx = space.centroid_x || 0;
+  const cy = space.centroid_y || 0;
+
+  // Compute polygon offsets relative to centroid
+  const relPoly = space.polygon.map(([x, y]) => [x - cx, y - cy]);
 
   const spaceData = {
     id: uuid(),
@@ -1732,22 +1876,48 @@ async function duplicateSpace(space) {
     building_id: state.selectedBuildingId || space.building_id,
     campus_id: state.selectedCampusId || space.campus_id,
     floor_index: state.currentFloorIndex,
-    centroid_x: newCx,
-    centroid_y: newCy,
-    polygon: newPoly,
+    centroid_x: cx,
+    centroid_y: cy,
+    polygon: space.polygon.map(p => [...p]),
     is_accessible: space.is_accessible ?? true,
     is_navigable: space.is_navigable ?? true,
     is_outdoor: space.is_outdoor ?? false,
     tags: space.tags || [],
   };
 
+  state.pendingDuplicate = spaceData;
+  state.pendingDupOrigPoly = relPoly;
+  state.mode = 'placeDuplicate';
+  canvas.classList.add('crosshair');
+  for (const btn of document.querySelectorAll('.tool-bar button')) {
+    btn.classList.remove('active');
+  }
+  $('add-space-form').style.display = 'none';
+  $('connect-form').style.display = 'none';
+}
+
+function exitDuplicatePlaceMode() {
+  state.pendingDuplicate = null;
+  state.pendingDupOrigPoly = null;
+  state.snapLines = [];
+  state.mode = 'select';
+  canvas.classList.remove('crosshair');
+  $('tool-select').classList.add('active');
+  tooltip.style.display = 'none';
+  render();
+}
+
+async function finishDuplicatePlace() {
+  const spaceData = state.pendingDuplicate;
+  if (!spaceData) return;
+  exitDuplicatePlaceMode();
   try {
     await api('/spaces', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(spaceData),
     });
-    notify(`Duplicated "${space.display_name}"`);
+    notify(`Duplicated "${spaceData.display_name}"`);
     await reloadCurrentFloor();
   } catch (e) { /* handled */ }
 }
@@ -1771,6 +1941,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (state.mode === 'moveSpace') {
       cancelMove();
+    }
+    if (state.mode === 'placeDuplicate') {
+      exitDuplicatePlaceMode();
     }
     hideContextMenu();
     $('info-overlay').style.display = 'none';

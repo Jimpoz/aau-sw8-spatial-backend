@@ -51,6 +51,7 @@ class SpaceType(str, Enum):
     DOOR_LOCKED = "DOOR_LOCKED"
     DOOR_EMERGENCY = "DOOR_EMERGENCY"
     PASSAGE = "PASSAGE"
+    OPEN = "OPEN"
     # Special
     INACCESSIBLE = "INACCESSIBLE"
     UNKNOWN = "UNKNOWN"
