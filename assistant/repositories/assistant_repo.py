@@ -12,25 +12,25 @@ class AssistantRepository:
         limit: int = 10,
     ) -> list[dict]:
         """
-        Performs a vector search to find the most contextually relevant spaces, 
+        Performs a vector search to find the most contextually relevant spaces,
         and then traverses the graph to find their physical location and connected neighbors.
         Also helping in understanding how they are connected to each other and the physical context of the building.
         """
-        
+
         cypher_query = """
         // Semanti Search
         CALL db.index.vector.queryNodes('space_embedding_idx', $limit, $query_vector)
         YIELD node AS space, score
         WHERE space.campus_id = $campus_id AND space.is_navigable = true
-        
+
         // Vertical Context
         MATCH (building:Building)-[:HAS_FLOOR]->(floor:Floor)-[:HAS_SPACE]->(space)
-        
+
         // Horizontal Context
         // We use OPTIONAL MATCH so the query doesn't fail if a room has no connections yet
         OPTIONAL MATCH (space)-[r:CONNECTS_TO]-(neighbor:Space)
-        
-        RETURN 
+
+        RETURN
             space.display_name AS name,
             space.space_type AS type,
             floor.display_name AS floor_name,
@@ -42,16 +42,16 @@ class AssistantRepository:
             score
         ORDER BY score DESC
         """
-        
+
         records = self.db.execute(
-            cypher_query, 
+            cypher_query,
             {"campus_id": campus_id, "query_vector": query_vector, "limit": limit}
         )
-        
+
         results = []
         for record in records:
             connections = [c for c in record["connected_to"] if c is not None]
-            
+
             results.append({
                 "name": record["name"],
                 "type": record["type"],
@@ -60,7 +60,7 @@ class AssistantRepository:
                 "connected_to": connections,
                 "score": record["score"]
             })
-            
+
         return results
 
     def get_anchor_space(

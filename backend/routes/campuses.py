@@ -71,7 +71,10 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
         buildings_out.append({**building, "floors": floors_out})
 
     # Export connection nodes (doors/passages) with their connected spaces
-    conn_types = ["DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE"]
+    conn_types = [
+        "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE",
+        "STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP",
+    ]
     conn_result = db.execute(
         """
         MATCH (conn:Space {campus_id: $campus_id})

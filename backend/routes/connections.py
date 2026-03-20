@@ -18,6 +18,11 @@ _CONN_SPACE_TYPES = {
     SpaceType.DOOR_LOCKED,
     SpaceType.DOOR_EMERGENCY,
     SpaceType.PASSAGE,
+    # Vertical connection types
+    SpaceType.STAIRCASE,
+    SpaceType.ELEVATOR,
+    SpaceType.ESCALATOR,
+    SpaceType.RAMP,
 }
 
 
@@ -57,9 +62,11 @@ def create_connection(data: ConnectionCreate, db: Database = Depends(get_db)):
 
     traversal_cost = compute_traversal_cost(data.space_type.value, None, None, None)
 
-    # Inherit context from space A
+    # Inherit context from space A; cross-floor connections get no floor_id
     campus_id = space_a.get("campus_id")
-    floor_id = space_a.get("floor_id")
+    floor_a = space_a.get("floor_id")
+    floor_b = space_b.get("floor_id")
+    floor_id = floor_a if floor_a == floor_b else None
 
     # Create the intermediate door/passage node as a Space
     space_repo.create_space(

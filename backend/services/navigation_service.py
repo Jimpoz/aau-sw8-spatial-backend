@@ -16,6 +16,10 @@ def _instruction(node: dict) -> str:
         return f"Take stairs to {name}"
     if space_type == "ELEVATOR":
         return f"Take elevator to {name}"
+    if space_type == "ESCALATOR":
+        return f"Take escalator to {name}"
+    if space_type == "RAMP":
+        return f"Take ramp to {name}"
     if space_type in ("ENTRANCE", "ENTRANCE_SECONDARY"):
         return f"Enter through {name}"
     if space_type == "EXIT_EMERGENCY":

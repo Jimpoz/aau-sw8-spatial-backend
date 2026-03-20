@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 
 from core.exceptions import NotFoundError, NavigationError, MapImportError
 from db import get_db
-from routes import campuses, buildings, floors, spaces, connections, navigation, search, assistant
+from routes import campuses, buildings, floors, spaces, connections, navigation, search
 from scripts.init_db import apply_schema
 
 
@@ -51,7 +51,6 @@ app.include_router(spaces.router, prefix=PREFIX)
 app.include_router(connections.router, prefix=PREFIX)
 app.include_router(navigation.router, prefix=PREFIX)
 app.include_router(search.router, prefix=PREFIX)
-app.include_router(assistant.router, prefix=PREFIX)
 
 
 @app.get("/health")

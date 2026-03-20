@@ -92,6 +92,10 @@ def compute_traversal_cost(
         return transition_time_s or 30.0
     if st == "STAIRCASE":
         return transition_time_s or 15.0
+    if st == "ESCALATOR":
+        return transition_time_s or 20.0
+    if st == "RAMP":
+        return transition_time_s or 10.0
 
     # Rooms/corridors — half-diagonal at walking speed
     if width_m is not None and length_m is not None and (width_m > 0 or length_m > 0):

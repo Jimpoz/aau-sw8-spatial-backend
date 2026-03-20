@@ -169,8 +169,11 @@ class SpaceRepository:
                     space["subspaces"].append(sub)
             spaces.append(space)
 
-        # Connection nodes (doors/passages) connected to spaces on this floor
-        conn_types = ["DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE"]
+        # Connection nodes (doors/passages/vertical) connected to spaces on this floor
+        conn_types = [
+            "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE",
+            "STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP",
+        ]
         conn_result = self.db.execute(
             """
             MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space)-[:CONNECTS_TO]-(conn:Space)
@@ -185,6 +188,31 @@ class SpaceRepository:
             node["z_index"] = conn_z
             node["subspaces"] = []
             spaces.append(node)
+
+        # Cross-floor vertical connections: find spaces on this floor linked
+        # through a vertical connection node to a space on a different floor
+        vertical_types = ["STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP"]
+        vert_result = self.db.execute(
+            """
+            MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space)-[:CONNECTS_TO]->(conn:Space)-[:CONNECTS_TO]->(remote:Space)
+            WHERE conn.space_type IN $vertical_types
+            MATCH (remote_floor:Floor)-[:HAS_SPACE]->(remote)
+            WHERE remote_floor.id <> $floor_id
+            RETURN s.id AS space_id, remote.id AS remote_space_id,
+                   remote_floor.floor_index AS remote_floor_index,
+                   conn.space_type AS connection_type
+            """,
+            {"floor_id": floor_id, "vertical_types": vertical_types},
+        )
+        vert_map: dict[str, list[dict]] = {}
+        for r in vert_result:
+            vert_map.setdefault(r["space_id"], []).append({
+                "to_space_id": r["remote_space_id"],
+                "to_floor_index": r["remote_floor_index"],
+                "connection_type": r["connection_type"],
+            })
+        for space in spaces:
+            space["vertical_connections"] = vert_map.get(space.get("id"), [])
 
         return spaces
 

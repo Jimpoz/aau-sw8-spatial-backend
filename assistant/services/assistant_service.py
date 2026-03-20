@@ -50,7 +50,6 @@ def _embed_cache_put(key: str, value: List[float]):
 def get_embedder():
     global _EMBEDDER
     if _EMBEDDER is None:
-        #print(f"Loading Embedder on {DEVICE} ...")
         hf_token = os.getenv("HF_TOKEN")
         _EMBEDDER = SentenceTransformer(
             "all-MiniLM-L6-v2",
@@ -68,7 +67,6 @@ def get_llm():
             model_id = os.getenv("ASSISTANT_ONLINE_MODEL_ID") or "" # To Determine which model to use
         else:
             model_id = os.getenv("ASSISTANT_OFFLINE_MODEL_ID") or "HuggingFaceTB/SmolLM2-360M-Instruct"
-        #print(f"Loading {model_id} on {DEVICE} ...")
         hf_token = os.getenv("HF_TOKEN")
 
         _TOKENIZER = AutoTokenizer.from_pretrained(
@@ -87,7 +85,7 @@ def get_llm():
         # do_sample = off to prevent hallucinations
         _GEN_CONFIG = GenerationConfig(
             max_new_tokens=150,
-            do_sample=False, 
+            do_sample=False,
             use_cache=True,
             pad_token_id=_TOKENIZER.eos_token_id,
             eos_token_id=_TOKENIZER.eos_token_id,
@@ -116,7 +114,7 @@ def _truncate_context(tokenizer: AutoTokenizer, prefix: str, question: str, max_
 def clean_response(text: str) -> str:
     """Prevents the LLM to return unnecessary reasoning in the output"""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-    
+
     if re.search(r"(?i)\bso,\s*(you would need|to get to|just|walk|go)", text):
         parts = re.split(r"(?i)\bso,\s*", text)
         if len(parts) > 1:
@@ -140,7 +138,7 @@ def clean_response(text: str) -> str:
     text = text.strip()
     if "." in text:
         text = text.split(".")[0] + "."
-        
+
     return text.replace("\n", " ").strip()
 
 
@@ -243,8 +241,6 @@ class AssistantService:
                 res = None
 
             if res:
-                total_ms = (time.perf_counter() - t0) * 1000
-                #print(f"DEBUG: chat total time {total_ms:.1f} ms (global:{res.get('method')})")
                 verb = "farthest" if extreme == "max" else "closest"
                 target_label = "space"
                 # To fix, make it work for all types, not just offices
@@ -257,10 +253,8 @@ class AssistantService:
 
         query_vector = await self._encode_query(user_query)
 
-        t_repo0 = time.perf_counter()
         similar_spaces = self.repo.search_similar_spaces(campus_id, query_vector, limit=10)
-        t_repo_ms = (time.perf_counter() - t_repo0) * 1000
-        
+
         context_lines = []
         for s in similar_spaces:
             location = f"located on {s.get('floor_name', 'an unknown floor')} in the {s.get('building_name', 'unknown building')}."
@@ -292,9 +286,6 @@ class AssistantService:
         ]
 
         response = await asyncio.to_thread(_generate_sync, messages)
-
-        total_ms = (time.perf_counter() - t0) * 1000
-        #print(f"DEBUG: chat total time {total_ms:.1f} ms")
 
         return {
             "answer": response,

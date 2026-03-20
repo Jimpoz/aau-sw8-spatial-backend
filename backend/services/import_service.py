@@ -10,9 +10,21 @@ from services.geometry_service import (
     area_from_polygon,
     compute_traversal_cost,
 )
-from sentence_transformers import SentenceTransformer
+import os
+import httpx
 
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+ASSISTANT_URL = os.getenv("ASSISTANT_URL", "http://assistant:8001")
+
+
+def _embed_texts(texts: list[str]) -> list[list[float] | None]:
+    """Call the assistant embed endpoint. Returns None for each text on failure."""
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(f"{ASSISTANT_URL}/internal/embed", json={"texts": texts})
+            resp.raise_for_status()
+            return resp.json()["vectors"]
+    except Exception:
+        return [None] * len(texts)
 
 class ImportService:
     def __init__(self, db: Database):
@@ -120,7 +132,8 @@ class ImportService:
 
         text_to_embed = f"{space.display_name}. Type: {space.space_type}. Tags: {' '.join(space.tags)}"
 
-        vector = embedder.encode(text_to_embed).tolist()
+        vectors = _embed_texts([text_to_embed])
+        vector = vectors[0]
 
         self.space_repo.create_space(
             SpaceCreate(

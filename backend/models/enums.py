@@ -25,9 +25,7 @@ class SpaceType(str, Enum):
     EXIT_EMERGENCY = "EXIT_EMERGENCY"
     # Vertical circulation
     STAIRCASE = "STAIRCASE"
-    STAIRCASE_LANDING = "STAIRCASE_LANDING"
     ELEVATOR = "ELEVATOR"
-    ELEVATOR_LOBBY = "ELEVATOR_LOBBY"
     ESCALATOR = "ESCALATOR"
     RAMP = "RAMP"
     # Cross-building connectors

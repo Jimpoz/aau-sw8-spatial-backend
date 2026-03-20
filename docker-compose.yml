@@ -1,19 +1,47 @@
 version: "3.9"
 
 services:
+  middleware:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - ASSISTANT_URL=http://assistant:8001
+    depends_on:
+      - backend
+      - assistant
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
+    environment:
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - ASSISTANT_URL=http://assistant:8001
+    volumes:
+      - ./backend:/app
+
+  assistant:
+    build:
+      context: ./assistant
+      dockerfile: Dockerfile
+    expose:
+      - "8001"
     environment:
       - NEO4J_URI=${NEO4J_URI}
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - HF_TOKEN=${HF_TOKEN}
+      - ASSISTANT_MODE=${ASSISTANT_MODE:-offline}
     volumes:
-      - ./backend:/app
+      - ./assistant:/app
 
   frontend:
     build:
@@ -22,4 +50,4 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - backend
+      - middleware
