@@ -24,7 +24,7 @@ def _to_neo4j(data: dict) -> dict:
 def _from_neo4j(node: dict) -> dict:
     """Deserialize JSON strings back to Python objects."""
     d = dict(node)
-    for key in ("polygon", "metadata"):
+    for key in ("polygon", "metadata", "room_object_counts_json"):
         if isinstance(d.get(key), str):
             try:
                 d[key] = json.loads(d[key])

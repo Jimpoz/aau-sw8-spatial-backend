@@ -140,6 +140,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .conn-item label { font-size: 12px; color: #555; display: flex; align-items: center; gap: 4px; }
 .conn-item label input[type="checkbox"] { width: auto; margin: 0; }
 #info-accessible { width: auto; }
+.room-upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 12px; margin-bottom: 8px; }
+.room-upload-grid label { display: flex; flex-direction: column; gap: 2px; color: #555; }
+.room-upload-grid input[type="file"] { font-size: 11px; width: 100%; }
+#info-room-summary { font-size: 13px; margin-bottom: 8px; }
+.room-objects-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.room-obj-tag { background: #eef4fc; color: #1a5c9e; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
 .parent-link, .subspace-link { color: #4a90d9; text-decoration: none; cursor: pointer; }
 .parent-link:hover, .subspace-link:hover { text-decoration: underline; }
 #info-subspaces h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: 8px; margin-top: 14px; }
@@ -358,7 +364,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <h2 id="info-title">Space Info</h2>
     <div id="info-parent"></div>
     <div class="info-grid" id="info-grid"></div>
-    <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px">Connections</h3>
+    <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px">Room Images</h3>
+    <div id="info-room-summary"></div>
+    <div class="room-upload-grid">
+      <label>North <input type="file" id="img-north" accept="image/*"></label>
+      <label>East <input type="file" id="img-east" accept="image/*"></label>
+      <label>South <input type="file" id="img-south" accept="image/*"></label>
+      <label>West <input type="file" id="img-west" accept="image/*"></label>
+    </div>
+    <button class="btn-primary" id="analyze-room-btn" style="margin-top:8px">Analyze Room</button>
+    <div id="analyze-status" style="font-size:12px;margin-top:6px;color:#888"></div>
+    <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px;margin-top:14px">Connections</h3>
     <div class="conn-list" id="info-connections"></div>
     <div id="info-subspaces"></div>
     <div class="modal-buttons" style="margin-top:14px">
@@ -1656,6 +1672,19 @@ $('ctx-delete').addEventListener('click', () => {
 /* ═══════════════════════════════════════════════
    Info Modal (Editable)
    ═══════════════════════════════════════════════ */
+function renderRoomSummary(data) {
+  const el = $('info-room-summary');
+  const counts = data.room_object_counts || data.room_object_counts_json;
+  if (!counts || !Object.keys(counts).length) {
+    el.innerHTML = '<span style="color:#aaa">No room analysis yet</span>';
+    return;
+  }
+  el.innerHTML = '<div class="room-objects-list">' +
+    Object.entries(counts).map(([k, v]) =>
+      `<span class="room-obj-tag">${k.replace(/_/g, ' ')} (${v})</span>`
+    ).join('') + '</div>';
+}
+
 async function showInfoModal(space) {
   state._editingSpace = space;
   $('info-title').textContent = space.display_name || 'Space Info';
@@ -1692,6 +1721,12 @@ async function showInfoModal(space) {
   } else {
     parentDiv.innerHTML = '';
   }
+
+  // Room summary
+  renderRoomSummary(space);
+  ['img-north','img-east','img-south','img-west'].forEach(id => { $(id).value = ''; });
+  $('analyze-status').textContent = '';
+  $('analyze-room-btn').disabled = false;
 
   // Connections
   const connDiv = $('info-connections');
@@ -1791,6 +1826,38 @@ $('info-save').addEventListener('click', async () => {
     $('info-overlay').style.display = 'none';
     await reloadCurrentFloor();
   } catch (e) { /* handled */ }
+});
+
+$('analyze-room-btn').addEventListener('click', async () => {
+  const space = state._editingSpace;
+  if (!space) return;
+  const north = $('img-north').files[0];
+  const east  = $('img-east').files[0];
+  const south = $('img-south').files[0];
+  const west  = $('img-west').files[0];
+  if (!north || !east || !south || !west) {
+    notify('Please select all 4 directional images (N/E/S/W)', 'error');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('room_name', space.display_name || space.id);
+  fd.append('north_image', north);
+  fd.append('east_image', east);
+  fd.append('south_image', south);
+  fd.append('west_image', west);
+
+  $('analyze-status').textContent = 'Analyzing images...';
+  $('analyze-room-btn').disabled = true;
+  try {
+    const result = await api('/room-summary/room-objects/setup', { method: 'POST', body: fd });
+    renderRoomSummary(result);
+    $('analyze-status').textContent = '';
+    notify('Room analysis complete');
+  } catch (e) {
+    $('analyze-status').textContent = 'Analysis failed';
+  } finally {
+    $('analyze-room-btn').disabled = false;
+  }
 });
 
 $('info-close').addEventListener('click', () => {
