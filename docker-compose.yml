@@ -10,9 +10,12 @@ services:
     environment:
       - BACKEND_URL=http://backend:8000
       - ASSISTANT_URL=http://assistant:8001
+      - IMAGE_PIPELINE_URL=http://image_pipeline:8002
+      - MIDDLEWARE_DEBUG_UPSTREAMS=${MIDDLEWARE_DEBUG_UPSTREAMS:-false}
     depends_on:
       - backend
       - assistant
+      - image_pipeline
 
   backend:
     build:
@@ -25,6 +28,9 @@ services:
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - ASSISTANT_URL=http://assistant:8001
+    networks:
+      - default
+      - aau_sw8_neo4j
     volumes:
       - ./backend:/app
 
@@ -39,9 +45,28 @@ services:
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - HF_TOKEN=${HF_TOKEN}
-      - ASSISTANT_MODE=${ASSISTANT_MODE:-offline}
+      - ASSISTANT_MODE=${ASSISTANT_MODE}
+    networks:
+      - default
+      - aau_sw8_neo4j
     volumes:
       - ./assistant:/app
+
+  image_pipeline:
+    build:
+      context: ./image_pipeline
+      dockerfile: Dockerfile
+    expose:
+      - "8002"
+    environment:
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+    networks:
+      - default
+      - aau_sw8_neo4j
+    volumes:
+      - ./image_pipeline:/app
 
   frontend:
     build:
@@ -51,3 +76,8 @@ services:
       - "3000:80"
     depends_on:
       - middleware
+
+networks:
+  aau_sw8_neo4j:
+    external: true
+    name: aau-sw8-indoor-data-pipeline_default
