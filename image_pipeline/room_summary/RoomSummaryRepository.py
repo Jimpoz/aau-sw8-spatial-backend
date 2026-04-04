@@ -66,12 +66,9 @@ class RoomSummaryRepository:
             """
             MATCH (space:Space)
             WHERE
-              space.space_type IN $room_space_types
-              AND (
-                toLower(trim(coalesce(space.display_name, ""))) = $normalized_room_name
-                OR toLower(trim(coalesce(space.short_name, ""))) = $normalized_room_name
-                OR toLower(trim(coalesce(toString(space.id), ""))) = $normalized_room_name
-              )
+              toLower(trim(coalesce(space.display_name, ""))) = $normalized_room_name
+              OR toLower(trim(coalesce(space.short_name, ""))) = $normalized_room_name
+              OR toLower(trim(coalesce(toString(space.id), ""))) = $normalized_room_name
             WITH space,
                  CASE
                    WHEN toLower(trim(coalesce(space.display_name, ""))) = $normalized_room_name THEN 0
@@ -85,7 +82,6 @@ class RoomSummaryRepository:
                    space.metadata AS metadata
             """,
             normalized_room_name=self._normalize(room_name),
-            room_space_types=list(self._ROOM_SPACE_TYPES),
         )
 
         if not rows:
