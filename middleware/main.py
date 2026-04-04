@@ -3,6 +3,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from pydantic import BaseModel
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 ASSISTANT_URL = os.getenv("ASSISTANT_URL", "http://assistant:8001")
@@ -14,6 +15,11 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 MIDDLEWARE_DEBUG_UPSTREAMS = _env_flag("MIDDLEWARE_DEBUG_UPSTREAMS")
+
+
+class CampusListItem(BaseModel):
+    id: str
+    name: str
 
 OPENAPI_SOURCES = (
     {
@@ -43,10 +49,13 @@ app = FastAPI(
         "Gateway for backend, assistant, and image pipeline services. "
         "The docs show middleware-owned routes only."
     ),
-    openapi_tags=(
+    openapi_tags=[
+        {"name": "mobile", "description": "Lightweight endpoints for mobile clients."},
+    ]
+    + (
         [{"name": "debug", "description": "Gateway-level debugging and upstream inspection."}]
         if MIDDLEWARE_DEBUG_UPSTREAMS
-        else None
+        else []
     ),
 )
 
@@ -86,6 +95,31 @@ async def _proxy(request: Request, target_base: str, upstream_name: str) -> Resp
         status_code=resp.status_code,
         headers=response_headers,
     )
+
+
+def _strip_space_images(space: dict) -> None:
+    if "room_images" in space:
+        space["room_images"] = []
+    metadata = space.get("metadata")
+    if isinstance(metadata, dict):
+        rs = metadata.get("room_summary")
+        if isinstance(rs, dict):
+            rs["room_images"] = []
+            for view in rs.get("views", []):
+                if isinstance(view, dict):
+                    view.pop("svg", None)
+    for subspace in space.get("subspaces", []):
+        _strip_space_images(subspace)
+
+
+def _strip_image_data(data: dict) -> None:
+    campus = data.get("campus")
+    if not campus:
+        return
+    for building in campus.get("buildings", []):
+        for floor in building.get("floors", []):
+            for space in floor.get("spaces", []):
+                _strip_space_images(space)
 
 
 async def debug_upstreams() -> dict[str, Any]:
@@ -147,6 +181,53 @@ async def health():
         "assistant": "ok" if assistant_ok else "unavailable",
         "image_pipeline": "ok" if image_pipeline_ok else "unavailable",
     }
+
+
+@app.get("/api/v1/mobile/campuses", response_model=list[CampusListItem], tags=["mobile"])
+async def mobile_campus_list():
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{BACKEND_URL}/api/v1/campuses")
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        return Response(
+            content=exc.response.content,
+            status_code=exc.response.status_code,
+            headers={"Content-Type": "application/json"},
+        )
+    except httpx.HTTPError:
+        return Response(
+            content=b'{"detail":"backend unavailable"}',
+            status_code=502,
+            headers={"Content-Type": "application/json"},
+        )
+    return [{"id": c["id"], "name": c["name"]} for c in resp.json()]
+
+
+@app.get("/api/v1/mobile/campuses/{campus_id}/map", tags=["mobile"])
+async def mobile_map_full(campus_id: str):
+    async with httpx.AsyncClient(timeout=900.0) as client:
+        resp = await client.get(f"{BACKEND_URL}/api/v1/campuses/{campus_id}/export")
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers={"Content-Type": "application/json", "X-Gateway-Upstream": "backend"},
+    )
+
+# discards svg data for much smaller file sizes
+@app.get("/api/v1/mobile/campuses/{campus_id}/map/light", tags=["mobile"])
+async def mobile_map_light(campus_id: str):
+    async with httpx.AsyncClient(timeout=900.0) as client:
+        resp = await client.get(f"{BACKEND_URL}/api/v1/campuses/{campus_id}/export")
+    if resp.status_code != 200:
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers={"Content-Type": "application/json"},
+        )
+    data = resp.json()
+    _strip_image_data(data)
+    return data
 
 
 @app.api_route("/api/v1/assistant", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
