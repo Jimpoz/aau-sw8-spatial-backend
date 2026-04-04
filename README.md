@@ -190,8 +190,20 @@ image_pipeline/
 
 ```
 middleware/
-└── main.py   FastAPI gateway with `/health`, optional `/debug/upstreams`, and proxy routes to backend, assistant, and image_pipeline
+└── main.py   FastAPI gateway with `/health`, mobile endpoints, optional `/debug/upstreams`, and proxy routes to backend, assistant, and image_pipeline
 ```
+
+### Mobile Endpoints
+
+Lightweight endpoints for mobile clients, available through the middleware on port 8080.
+
+| Method | Path                                          | Description                                      |
+|--------|-----------------------------------------------|--------------------------------------------------|
+| `GET`  | `/api/v1/mobile/campuses`                     | List all campuses (id + name only)               |
+| `GET`  | `/api/v1/mobile/campuses/{campus_id}/map`     | Full map download (same as backend export)        |
+| `GET`  | `/api/v1/mobile/campuses/{campus_id}/map/light` | Map download without SVG/image data             |
+
+The `/map/light` endpoint strips embedded room images and view SVGs from the response, significantly reducing payload size for clients that don't need image data.
 
 ## Frontend Module
 
