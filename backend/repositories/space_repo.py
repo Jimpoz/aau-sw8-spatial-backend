@@ -2,6 +2,7 @@ import json
 
 from db import Database
 from core.exceptions import SpaceNotFound
+from models.enums import CONN_SPACE_TYPES
 from models.space import SpaceCreate, SpaceUpdate
 
 
@@ -173,10 +174,7 @@ class SpaceRepository:
             spaces.append(space)
 
         # Connection nodes (doors/passages/vertical) connected to spaces on this floor
-        conn_types = [
-            "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE",
-            "STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP",
-        ]
+        conn_types = [t.value for t in CONN_SPACE_TYPES]
         conn_result = self.db.execute(
             """
             MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space)-[:CONNECTS_TO]-(conn:Space)

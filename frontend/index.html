@@ -488,22 +488,9 @@ const COLORS = {
   OPEN:'#E0E0E0',
 };
 
-const SPACE_TYPES = [
-  'ROOM_GENERIC','ROOM_OFFICE','ROOM_CLASSROOM','ROOM_LECTURE_HALL','ROOM_LAB',
-  'ROOM_MEETING','ROOM_STORAGE','ROOM_UTILITY','RESTROOM','RESTROOM_ACCESSIBLE',
-  'CORRIDOR','CORRIDOR_SEGMENT','LOBBY','WAITING_AREA','RECEPTION',
-  'ENTRANCE','ENTRANCE_SECONDARY','EXIT_EMERGENCY',
-  'STAIRCASE','ELEVATOR','ESCALATOR','RAMP',
-  'BRIDGE','TUNNEL','COVERED_WALKWAY',
-  'OUTDOOR_PATH','OUTDOOR_PLAZA','OUTDOOR_COURTYARD','OUTDOOR_STAIRS','PARKING',
-  'CAFETERIA','CAFE','LIBRARY','GYM','AUDITORIUM','SHOP',
-  'DOOR_STANDARD','DOOR_AUTOMATIC','DOOR_LOCKED','DOOR_EMERGENCY','PASSAGE','OPEN',
-  'INACCESSIBLE','UNKNOWN',
-];
-const CONN_SPACE_TYPES = [
-  'DOOR_STANDARD','DOOR_AUTOMATIC','DOOR_LOCKED','DOOR_EMERGENCY',
-  'PASSAGE','OPEN','STAIRCASE','ELEVATOR','ESCALATOR','RAMP',
-];
+// Fetched from backend at startup via /api/v1/enums/space-types
+let SPACE_TYPES = [];
+let CONN_SPACE_TYPES = [];
 
 /* ═══════════════════════════════════════════════
    DOM References
@@ -2237,6 +2224,14 @@ async function loadCampuses() {
   }
 }
 
+async function loadSpaceTypes() {
+  try {
+    const data = await api('/enums/space-types');
+    SPACE_TYPES = data.space_types || [];
+    CONN_SPACE_TYPES = data.connection_types || [];
+  } catch (e) { /* keep empty defaults */ }
+}
+
 async function init() {
   resizeCanvas();
   window.addEventListener('resize', () => {
@@ -2244,6 +2239,7 @@ async function init() {
     if (state.bounds) fitToCanvas();
     render();
   });
+  await loadSpaceTypes();
   await loadCampuses();
   if (state.campuses.length === 1) {
     $('campus-select').value = state.campuses[0].id;

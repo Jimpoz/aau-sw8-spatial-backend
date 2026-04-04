@@ -2,23 +2,12 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from models.enums import SpaceType
+from models.enums import ROOM_SPACE_TYPES
 from .Neo4jQueryRunner import Neo4jQueryRunner
 
 
 class RoomSummaryRepository:
-    _ROOM_SPACE_TYPES = (
-        SpaceType.ROOM_GENERIC.value,
-        SpaceType.ROOM_OFFICE.value,
-        SpaceType.ROOM_CLASSROOM.value,
-        SpaceType.ROOM_LECTURE_HALL.value,
-        SpaceType.ROOM_LAB.value,
-        SpaceType.ROOM_MEETING.value,
-        SpaceType.ROOM_STORAGE.value,
-        SpaceType.ROOM_UTILITY.value,
-        SpaceType.RESTROOM.value,
-        SpaceType.RESTROOM_ACCESSIBLE.value,
-    )
+    _ROOM_SPACE_TYPES = tuple(t.value for t in ROOM_SPACE_TYPES)
 
     def __init__(self, query_runner: Neo4jQueryRunner) -> None:
         self._query_runner = query_runner

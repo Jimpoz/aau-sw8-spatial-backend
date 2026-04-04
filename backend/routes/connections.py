@@ -4,26 +4,12 @@ from fastapi import APIRouter, HTTPException, Depends
 from db import Database, get_db
 from models.connection import Connection, ConnectionCreate
 from models.space import SpaceCreate
-from models.enums import SpaceType
+from models.enums import CONN_SPACE_TYPES
 from repositories.connection_repo import ConnectionRepository
 from repositories.space_repo import SpaceRepository
 from services.geometry_service import compute_traversal_cost, find_shared_edge_midpoint
 
 router = APIRouter(prefix="/connections", tags=["connections"])
-
-# SpaceType values that represent connection/door nodes
-_CONN_SPACE_TYPES = {
-    SpaceType.DOOR_STANDARD,
-    SpaceType.DOOR_AUTOMATIC,
-    SpaceType.DOOR_LOCKED,
-    SpaceType.DOOR_EMERGENCY,
-    SpaceType.PASSAGE,
-    # Vertical connection types
-    SpaceType.STAIRCASE,
-    SpaceType.ELEVATOR,
-    SpaceType.ESCALATOR,
-    SpaceType.RAMP,
-}
 
 
 @router.post("", response_model=Connection, status_code=201)
@@ -109,7 +95,7 @@ def get_connection(from_space_id: str, to_space_id: str, db: Database = Depends(
         {
             "from_id": from_space_id,
             "to_id": to_space_id,
-            "conn_types": [t.value for t in _CONN_SPACE_TYPES],
+            "conn_types": [t.value for t in CONN_SPACE_TYPES],
         },
     )
     if not result:
@@ -137,7 +123,7 @@ def delete_connection(from_space_id: str, to_space_id: str, db: Database = Depen
         {
             "from_id": from_space_id,
             "to_id": to_space_id,
-            "conn_types": [t.value for t in _CONN_SPACE_TYPES],
+            "conn_types": [t.value for t in CONN_SPACE_TYPES],
         },
     )
     if not result or result[0]["deleted"] == 0:
