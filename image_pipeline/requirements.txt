@@ -6,3 +6,4 @@ opencv-python==4.10.0.84
 python-multipart==0.0.19
 svgwrite==1.4.3
 ultralytics==8.3.58
+easyocr>=1.7,<2.0

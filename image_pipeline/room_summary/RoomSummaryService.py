@@ -10,6 +10,7 @@ from .RoomObjectDetectionSetupResult import RoomObjectDetectionSetupResult
 from .RoomObjectDetector import RoomObjectDetector
 from .RoomSummaryRepository import RoomSummaryRepository
 from .RoomSummaryResult import RoomSummaryResult
+from .RoomTextDetector import RoomTextDetector
 from .RoomVectorizer import RoomVectorizer
 from .ViewSummary import ViewSummary
 
@@ -25,6 +26,8 @@ class RoomSummaryService:
         fallback_confidence_threshold: float = 0.25,
         vector_palette_size: int = 8,
         max_vector_width: int = 480,
+        text_languages: Sequence[str] | None = None,
+        text_confidence_threshold: float = 0.4,
     ) -> None:
         selection = resolve_model_selection(
             config_path=model_config_path,
@@ -46,6 +49,10 @@ class RoomSummaryService:
             model_path=selection.model_path,
             class_config_path=explicit_class_config or selection.class_config_path,
             confidence_threshold=effective_confidence_threshold,
+        )
+        self._text_detector = RoomTextDetector(
+            languages=text_languages,
+            confidence_threshold=text_confidence_threshold,
         )
         self._vectorizer = RoomVectorizer(
             vector_palette_size=vector_palette_size,
@@ -69,14 +76,22 @@ class RoomSummaryService:
             raise ValueError(f"Exactly {expected_views} images are required.")
 
         overall_object_counts: dict[str, int] = {}
+        overall_text_counts: dict[str, int] = {}
         views: list[ViewSummary] = []
 
         # Build the detection counts and the SVG summary from the same frame in one pass.
         for view_index, image in enumerate(images, start=1):
             counts = dict(sorted(self._detector.detect_counts(image.frame).items()))
+            text_counts = dict(
+                sorted(self._text_detector.detect_text(image.frame).items())
+            )
             overall_object_counts = self._merge_object_counts(
                 overall_object_counts,
                 counts,
+            )
+            overall_text_counts = self._merge_object_counts(
+                overall_text_counts,
+                text_counts,
             )
 
             views.append(
@@ -84,6 +99,7 @@ class RoomSummaryService:
                     view_index=view_index,
                     source_name=image.source_name,
                     object_counts=counts,
+                    text_counts=text_counts,
                     svg=self._vectorizer.vectorize_view(
                         frame=image.frame,
                         view_index=view_index,
@@ -97,6 +113,7 @@ class RoomSummaryService:
             model_profile=self.model_profile,
             model_path=str(self.model_path),
             overall_object_counts=overall_object_counts,
+            overall_text_counts=overall_text_counts,
             views=views,
         )
 
@@ -140,6 +157,10 @@ class RoomSummaryService:
         room_object_counts = self._build_room_object_counts(
             result.overall_object_counts,
         )
+        room_text = self._build_room_objects(result.overall_text_counts)
+        room_text_counts = self._build_room_object_counts(
+            result.overall_text_counts,
+        )
         stored_images, selected_views = self._select_stored_images(
             images=images,
             stored_image_count=stored_image_count,
@@ -150,6 +171,8 @@ class RoomSummaryService:
             room_name=normalized_room_name,
             room_objects=room_objects,
             room_object_counts=room_object_counts,
+            room_text=room_text,
+            room_text_counts=room_text_counts,
             room_images=[
                 self._vectorizer.embed_frame_svg(image.frame, image.source_name)
                 for image in stored_images
@@ -161,6 +184,8 @@ class RoomSummaryService:
             room_name=stored_room_name,
             room_objects=room_objects,
             room_object_counts=room_object_counts,
+            room_text=room_text,
+            room_text_counts=room_text_counts,
             stored_image_count=len(stored_images),
             stored_views=selected_views,
             room_summary=result.views,

@@ -47,6 +47,8 @@ class RoomSummaryRepository:
         room_name: str,
         room_objects: list[str],
         room_object_counts: dict[str, int],
+        room_text: list[str],
+        room_text_counts: dict[str, int],
         room_images: list[str],
         stored_views: list[str],
         room_summary: list[dict[str, object]],
@@ -82,6 +84,8 @@ class RoomSummaryRepository:
         metadata["room_summary"] = {
             "room_objects": room_objects,
             "room_object_counts": dict(sorted(room_object_counts.items())),
+            "room_text": room_text,
+            "room_text_counts": dict(sorted(room_text_counts.items())),
             "room_images": room_images,
             "stored_image_count": len(room_images),
             "stored_views": stored_views,
@@ -90,6 +94,10 @@ class RoomSummaryRepository:
         }
         room_object_counts_json = json.dumps(
             dict(sorted(room_object_counts.items())),
+            separators=(",", ":"),
+        )
+        room_text_counts_json = json.dumps(
+            dict(sorted(room_text_counts.items())),
             separators=(",", ":"),
         )
 
@@ -102,6 +110,8 @@ class RoomSummaryRepository:
                    space.roomSummaryUpdatedAt
             SET space.room_objects = $room_objects,
                 space.room_object_counts_json = $room_object_counts_json,
+                space.room_text = $room_text,
+                space.room_text_counts_json = $room_text_counts_json,
                 space.room_images = $room_images,
                 space.room_summary_updated_at = $room_summary_updated_at,
                 space.metadata = $metadata
@@ -110,6 +120,8 @@ class RoomSummaryRepository:
             space_id=space_id,
             room_objects=room_objects,
             room_object_counts_json=room_object_counts_json,
+            room_text=room_text,
+            room_text_counts_json=room_text_counts_json,
             room_images=room_images,
             room_summary_updated_at=updated_at,
             metadata=json.dumps(metadata, separators=(",", ":"), sort_keys=True),

@@ -1704,14 +1704,27 @@ document.querySelectorAll('.info-tab').forEach(tab => {
 function renderRoomSummary(data) {
   const el = $('info-room-summary');
   const counts = data.room_object_counts || data.room_object_counts_json;
-  if (!counts || !Object.keys(counts).length) {
+  const textCounts = data.room_text_counts || data.room_text_counts_json;
+  const hasObjects = counts && Object.keys(counts).length;
+  const hasText = textCounts && Object.keys(textCounts).length;
+  if (!hasObjects && !hasText) {
     el.innerHTML = '<span style="color:#aaa">No room analysis yet</span>';
     return;
   }
-  el.innerHTML = '<div class="room-objects-list">' +
-    Object.entries(counts).map(([k, v]) =>
+  const renderTags = (entries) =>
+    '<div class="room-objects-list">' +
+    entries.map(([k, v]) =>
       `<span class="room-obj-tag">${k.replace(/_/g, ' ')} (${v})</span>`
     ).join('') + '</div>';
+
+  let html = '';
+  if (hasObjects) {
+    html += renderTags(Object.entries(counts));
+  }
+  if (hasText) {
+    html += renderTags(Object.entries(textCounts));
+  }
+  el.innerHTML = html;
 }
 
 function renderImageViewer(space) {
