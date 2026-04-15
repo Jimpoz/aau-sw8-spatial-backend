@@ -101,7 +101,6 @@ class ImportService:
             )
 
         # 4. Connection nodes
-        # 4. Connection nodes
         counts = {"spaces": len(self._centroids), "connections": 0}
         for conn in campus.connections:
             self._import_connection_node(conn)
@@ -193,7 +192,6 @@ class ImportService:
                 metadata=space.metadata,
                 embedding=vector,
                 traversal_cost=traversal_cost,
-                traversal_cost=traversal_cost,
             )
         )
 
@@ -232,5 +230,5 @@ class ImportService:
                 parent_id=space.id,
             )
 
-    def _import_connection_node(self, conn: ConnectionImport) -> None:
+    def _import_connection_node(self, conn: ConnectionNodeImport) -> None:
         self.conn_repo.create_connection(conn.from_space_id, conn.to_space_id)

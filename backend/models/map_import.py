@@ -69,7 +69,7 @@ class BuildingImport(BaseModel):
     building_bounds: Optional[list[list[float]]] = None
 
 
-class ConnectionImport(BaseModel):
+class ConnectionNodeImport(BaseModel):
     from_space_id: str
     to_space_id: str
     connection_type: Union[ConnectionType, str]

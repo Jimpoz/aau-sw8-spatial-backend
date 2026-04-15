@@ -233,43 +233,8 @@ def compute_traversal_cost(
     space_type: str,
     width_m: Optional[float],
     length_m: Optional[float],
-def compute_traversal_cost(
-    space_type: str,
-    width_m: Optional[float],
-    length_m: Optional[float],
     transition_time_s: Optional[float],
 ) -> float:
-    """Return traversal cost in seconds for a Space node."""
-    st = space_type.upper()
-
-    # Connection node types — small fixed costs
-    if st == "DOOR_STANDARD":
-        return 1.0
-    if st == "DOOR_AUTOMATIC":
-        return 0.5
-    if st == "DOOR_LOCKED":
-        return 5.0
-    if st == "DOOR_EMERGENCY":
-        return 2.0
-    if st == "PASSAGE":
-        return 0.5
-
-    # Vertical transport
-    if st == "ELEVATOR":
-        return transition_time_s or 30.0
-    if st == "STAIRCASE":
-        return transition_time_s or 15.0
-    if st == "ESCALATOR":
-        return transition_time_s or 20.0
-    if st == "RAMP":
-        return transition_time_s or 10.0
-
-    # Rooms/corridors — half-diagonal at walking speed
-    if width_m is not None and length_m is not None and (width_m > 0 or length_m > 0):
-        half_diag = math.sqrt(width_m ** 2 + length_m ** 2) / 2.0
-        return half_diag / _WALKING_SPEED
-
-    return 1.0  # default if no dimensions
     """Return traversal cost in seconds for a Space node."""
     st = space_type.upper()
 

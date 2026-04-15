@@ -174,15 +174,9 @@ class SpaceRepository:
 
     def get_floor_display(self, floor_id: str) -> list[dict]:
         """Return all spaces with z_index for rendering, including subspaces and connection nodes."""
-        # Top-level spaces and their subspaces with depth
-        """Return all spaces with z_index for rendering, including subspaces and connection nodes."""
-        # Top-level spaces and their subspaces with depth
         result = self.db.execute(
             """
             MATCH (:Floor {id: $floor_id})-[:HAS_SPACE]->(s:Space)
-            OPTIONAL MATCH path = (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
-            OPTIONAL MATCH (directParent:Space)-[:HAS_SUBSPACE]->(sub)
-            RETURN s, collect({node: sub, depth: length(path), parent_id: directParent.id, parent_name: directParent.display_name}) AS subspaces_with_depth
             OPTIONAL MATCH path = (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
             OPTIONAL MATCH (directParent:Space)-[:HAS_SUBSPACE]->(sub)
             RETURN s, collect({node: sub, depth: length(path), parent_id: directParent.id, parent_name: directParent.display_name}) AS subspaces_with_depth
@@ -191,21 +185,8 @@ class SpaceRepository:
         )
         spaces = []
         max_depth = 0
-        max_depth = 0
         for r in result:
             space = _from_neo4j(r["s"])
-            space["z_index"] = 0
-            space["subspaces"] = []
-            for item in r["subspaces_with_depth"]:
-                if item["node"] is not None:
-                    sub = _from_neo4j(item["node"])
-                    depth = item["depth"]
-                    sub["z_index"] = depth
-                    sub["parent_space_id"] = item["parent_id"]
-                    sub["parent_space_name"] = item["parent_name"]
-                    if depth > max_depth:
-                        max_depth = depth
-                    space["subspaces"].append(sub)
             space["z_index"] = 0
             space["subspaces"] = []
             for item in r["subspaces_with_depth"]:
