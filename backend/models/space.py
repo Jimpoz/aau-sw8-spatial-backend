@@ -29,12 +29,15 @@ class SpaceCreate(BaseModel):
     tags: list[str] = []
     metadata: Optional[dict] = None
     embedding: Optional[list[float]] = None
+    traversal_cost: Optional[float] = None
 
 
 class SpaceUpdate(BaseModel):
     display_name: Optional[str] = None
     short_name: Optional[str] = None
     space_type: Optional[SpaceType] = None
+    width_m: Optional[float] = None
+    length_m: Optional[float] = None
     centroid_x: Optional[float] = None
     centroid_y: Optional[float] = None
     centroid_lat: Optional[float] = None
@@ -48,6 +51,7 @@ class SpaceUpdate(BaseModel):
     tags: Optional[list[str]] = None
     metadata: Optional[dict[str, Any]] = None
     embedding: Optional[list[float]] = None
+    traversal_cost: Optional[float] = None
 
 
 class Space(BaseModel):
@@ -73,3 +77,4 @@ class Space(BaseModel):
     capacity: Optional[int] = None
     tags: list[str] = []
     metadata: Optional[dict] = None
+    traversal_cost: Optional[float] = None

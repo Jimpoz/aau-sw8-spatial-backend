@@ -1,21 +1,68 @@
-version: "3.9"
-
 services:
+  middleware:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - ASSISTANT_URL=http://assistant:8001
+      - IMAGE_PIPELINE_URL=http://image_pipeline:8002
+      - MIDDLEWARE_DEBUG_UPSTREAMS=${MIDDLEWARE_DEBUG_UPSTREAMS:-false}
+    depends_on:
+      - backend
+      - assistant
+      - image_pipeline
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    env_file:
-      - .env
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
+    environment:
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - ASSISTANT_URL=http://assistant:8001
+      - SUPABASE_DATABASE_URL=${SUPABASE_DATABASE_URL}
+      - SUPABASE_DB_PASSWORD=${SUPABASE_DB_PASSWORD}
+      - SUPABASE_ENABLE_SYNC=${SUPABASE_ENABLE_SYNC:-false}
+    volumes:
+      - ./backend:/app
+      - ./shared:/app/shared
+    depends_on:
+      - assistant
+
+  assistant:
+    build:
+      context: ./assistant
+      dockerfile: Dockerfile
+    expose:
+      - "8001"
     environment:
       - NEO4J_URI=${NEO4J_URI}
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - HF_TOKEN=${HF_TOKEN}
+      - ASSISTANT_MODE=${ASSISTANT_MODE}
     volumes:
-      - ./backend:/app
+      - ./assistant:/app
+
+  image_pipeline:
+    build:
+      context: ./image_pipeline
+      dockerfile: Dockerfile
+    expose:
+      - "8002"
+    environment:
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+    volumes:
+      - ./image_pipeline:/app
+      - ./shared:/app/shared
 
   frontend:
     build:
@@ -24,4 +71,4 @@ services:
     ports:
       - "3000:80"
     depends_on:
-      - backend
+      - middleware

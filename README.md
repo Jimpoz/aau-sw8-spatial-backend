@@ -8,25 +8,86 @@ Indoor spatial mapping and navigation backend for building complexes. Stores map
 docker compose up -d --build
 ```
 
-This starts three services:
+This starts the services in this repo and expects a reachable Neo4j instance for the app containers.
 
-| Service    | Port | Description                       |
-|------------|------|-----------------------------------|
-| `neo4j`    | 7474 / 7687 | Neo4j 5 with GDS plugin    |
-| `backend`  | 8000 | FastAPI (Python 3.11)             |
-| `frontend` | 3000 | Nginx serving the map editor      |
+| Service          | Port | Description                          |
+|------------------|------|--------------------------------------|
+| `middleware`     | 8080 | Public gateway and middleware docs   |
+| `backend`        | 8000 | Spatial/navigation API in dev compose |
+| `assistant`      | 8001 | Chat and embedding service in dev compose |
+| `image_pipeline` | 8002 | Room summary/image processing API in dev compose |
+| `frontend`       | 3000 | Nginx serving the map editor         |
 
 Default Neo4j credentials: `neo4j` / `password`.
 
+## Gateway Docs And Debugging
+
+- Middleware docs: `http://localhost:8080/docs`
+- Middleware OpenAPI JSON: `http://localhost:8080/openapi.json`
+- Middleware health: `http://localhost:8080/health`
+- Optional middleware upstream debug view: `http://localhost:8080/debug/upstreams`
+
+Notes:
+
+- The middleware docs now show middleware-owned routes only.
+- `/debug/upstreams` is disabled by default and only exists when `MIDDLEWARE_DEBUG_UPSTREAMS=true`.
+- The debug endpoint shows each upstream base URL, which public path prefixes it owns, and whether the middleware can reach that upstream's `/health` and `/openapi.json`.
+
+Enable the debug endpoint temporarily with:
+
+```bash
+MIDDLEWARE_DEBUG_UPSTREAMS=true docker compose up -d --build middleware
+```
+
+## Dev Compose
+
+`docker-compose.dev.yml` is an optional development override layered on top of `docker-compose.yml`.
+
+Use it when you want direct access to the internal FastAPI services during local development:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+```
+
+What the `.dev` override changes:
+
+- publishes `backend` on `:8000`
+- publishes `assistant` on `:8001`
+- publishes `image_pipeline` on `:8002`
+- bind-mounts `./middleware` into the container for reload-friendly middleware edits
+
+Without the `.dev` override, those internal services stay behind the gateway and you normally interact through `middleware` on `:8080`.
+
+With the `.dev` override enabled, the service docs are also available directly:
+
+- Backend docs: `http://localhost:8000/docs`
+- Assistant docs: `http://localhost:8001/docs`
+- Image pipeline docs: `http://localhost:8002/docs`
+
 ## Architecture
 
+``` 
+┌──────────┐     ┌────────────┐
+│ frontend │────>│ middleware │
+│ :3000    │     │ :8080      │
+│ (nginx)  │     │ (gateway)  │
+└──────────┘     └─────┬──────┘
+                       ├────────────> backend :8000
+                       ├────────────> assistant :8001
+                       └────────────> image_pipeline :8002
+
+backend        ────────> neo4j :7687
+assistant      ────────> neo4j :7687
+image_pipeline ────────> neo4j :7687
+
+backend        ────────> assistant :8001
+                     (internal embed during import)
 ```
-┌──────────┐     ┌──────────┐     ┌──────────┐
-│ frontend │────>│ backend  │────>│  neo4j   │
-│ :3000    │     │ :8000    │     │ :7687    │
-│ (nginx)  │     │ (FastAPI)│     │ (bolt)   │
-└──────────┘     └──────────┘     └──────────┘
-```
+
+- `frontend` proxies `/api/*` and `/health` to `middleware`.
+- `middleware` routes `/api/v1/assistant/*` to `assistant`, `/api/v1/room-summary*` to `image_pipeline`, and the remaining `/api/v1/*` routes to `backend`.
+- `backend`, `assistant`, and `image_pipeline` all connect directly to Neo4j.
+- `backend` also calls `assistant` directly for internal embeddings during map import.
 
 **Graph model:**
 
@@ -77,6 +138,80 @@ backend/
 └── scripts/
     ├── init_db.py       Applies schema (constraints + indexes) at startup
     └── import_map.py    CLI tool for importing map JSON files
+```
+
+## Assistant Modules
+
+```
+assistant/
+├── main.py                 FastAPI app, lifespan, public chat router, internal embed router
+├── db.py                   Neo4j helper used by repositories and routes
+├── core/
+│   └── config.py           pydantic-settings for Neo4j, HF token, and assistant model selection
+├── models/
+│   └── assistant.py        Chat and embedding request/response schemas
+├── repositories/
+│   └── assistant_repo.py   Vector search, anchor lookup, and distance-query graph access
+├── routes/
+│   ├── assistant.py        Public `/api/v1/assistant` chat endpoint
+│   └── embed.py            Internal embedding endpoint used by other services
+└── services/
+    └── assistant_service.py Model loading, embedding cache, retrieval context, and answer generation
+```
+
+## Image Pipeline Modules
+
+```
+image_pipeline/
+├── main.py                     FastAPI app for room-summary uploads and room-object setup
+├── db.py                       Neo4j driver lifecycle for room lookup and persistence
+├── models/
+│   └── enums.py                SpaceType enum subset used when matching room-like spaces
+└── room_summary/
+    ├── RoomSummaryService.py   Orchestrates room summarization, named summaries, and persistence setup
+    ├── RoomObjectDetector.py   YOLO model loading, validation, class-label mapping, and object counting
+    ├── RoomVectorizer.py       SVG/vector rendering plus embedded-image export helpers
+    ├── RoomSummaryRepository.py Room lookup plus summary/object persistence back into Neo4j
+    ├── Neo4jQueryRunner.py     Thin query adapter around the Neo4j driver/session
+    ├── model_config.py         Profile-based model/class-config resolution from cfg files
+    ├── model_download.py       Model path resolution and on-demand YOLO download support
+    ├── download_model.py       CLI helper for downloading a configured detection model
+    ├── class_labels.py         Optional class-id to label override loading
+    ├── runtime_env.py          Runtime environment setup before importing ultralytics
+    ├── RoomImageInput.py       Uploaded image wrapper passed into the summarizer
+    ├── ViewSummary.py          Per-view SVG and object-count response model
+    ├── RoomSummaryResult.py    Full multi-view summary response model
+    ├── NamedRoomSummaryResult.py Named-room summary response model
+    ├── RoomObjectDetectionSetupResult.py Persisted room-object setup response model
+    └── __init__.py             Direct package exports for the room-summary types
+```
+
+## Middleware Module
+
+```
+middleware/
+└── main.py   FastAPI gateway with `/health`, mobile endpoints, optional `/debug/upstreams`, and proxy routes to backend, assistant, and image_pipeline
+```
+
+### Mobile Endpoints
+
+Lightweight endpoints for mobile clients, available through the middleware on port 8080.
+
+| Method | Path                                          | Description                                      |
+|--------|-----------------------------------------------|--------------------------------------------------|
+| `GET`  | `/api/v1/mobile/campuses`                     | List all campuses (id + name only)               |
+| `GET`  | `/api/v1/mobile/campuses/{campus_id}/map`     | Full map download (same as backend export)        |
+| `GET`  | `/api/v1/mobile/campuses/{campus_id}/map/light` | Map download without SVG/image data             |
+
+The `/map/light` endpoint strips embedded room images and view SVGs from the response, significantly reducing payload size for clients that don't need image data.
+
+## Frontend Module
+
+```
+frontend/
+├── index.html   Static map-editor entry page
+├── nginx.conf   SPA hosting plus `/api` and `/health` proxying to middleware
+└── Dockerfile   Nginx image build for the frontend container
 ```
 
 ## API Endpoints

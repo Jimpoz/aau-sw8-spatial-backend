@@ -134,7 +134,43 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .info-grid .val { font-weight: 500; }
 .info-grid input.val-input { font-size: 13px; padding: 4px 6px; margin-bottom: 0; width: 100%; }
 .conn-list { max-height: 180px; overflow-y: auto; font-size: 13px; }
-.conn-item { padding: 4px 0; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 6px; }
+.conn-item { padding: 6px 0; border-bottom: 1px solid #f0f0f0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.conn-item .conn-controls { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 4px; }
+.conn-item select { font-size: 12px; padding: 2px 4px; border: 1px solid #ddd; border-radius: 4px; background: #fafafa; }
+.conn-item label { font-size: 12px; color: #555; display: flex; align-items: center; gap: 4px; }
+.conn-item label input[type="checkbox"] { width: auto; margin: 0; }
+#info-accessible { width: auto; }
+.room-upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 12px; margin-bottom: 8px; }
+.room-upload-grid label { display: flex; flex-direction: column; gap: 2px; color: #555; }
+.room-upload-grid input[type="file"] { font-size: 11px; width: 100%; }
+#info-room-summary { font-size: 13px; margin-bottom: 8px; }
+.room-objects-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.room-obj-tag { background: #eef4fc; color: #1a5c9e; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+.parent-link, .subspace-link { color: #4a90d9; text-decoration: none; cursor: pointer; }
+.parent-link:hover, .subspace-link:hover { text-decoration: underline; }
+#info-subspaces h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: #888; margin-bottom: 8px; margin-top: 14px; }
+.subspace-item { padding: 4px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+
+/* Info modal tabs */
+.info-tabs { display: flex; border-bottom: 2px solid #eee; margin-bottom: 14px; }
+.info-tab { padding: 8px 16px; font-size: 13px; font-weight: 500; color: #888; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: color 0.15s, border-color 0.15s; }
+.info-tab:hover { color: #555; }
+.info-tab.active { color: #4a90d9; border-bottom-color: #4a90d9; }
+.info-tab-content { display: none; }
+.info-tab-content.active { display: block; }
+
+/* Image viewer in Room Images tab */
+.image-viewer { margin-bottom: 12px; }
+.image-viewer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.image-viewer-card { border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; background: #fafafa; }
+.image-viewer-card .iv-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #888; padding: 6px 8px; background: #f0f0f0; }
+.image-viewer-card .iv-body { padding: 4px; min-height: 80px; display: flex; align-items: center; justify-content: center; }
+.image-viewer-card .iv-body img, .image-viewer-card .iv-body svg { max-width: 100%; height: auto; border-radius: 4px; }
+.image-viewer-card .iv-body .iv-empty { color: #bbb; font-size: 12px; font-style: italic; }
+.image-meta { font-size: 12px; color: #666; margin-top: 8px; padding: 8px; background: #f8f8f8; border-radius: 6px; }
+.image-meta .meta-row { display: flex; justify-content: space-between; padding: 2px 0; }
+.image-meta .meta-label { color: #888; }
+.image-meta .meta-value { font-weight: 500; }
 .conn-dir { font-size: 16px; flex-shrink: 0; }
 #chat-history {
   max-height: 250px; overflow-y: auto; margin-bottom: 10px;
@@ -220,9 +256,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         </optgroup>
         <optgroup label="Vertical">
           <option value="STAIRCASE">Staircase</option>
-          <option value="STAIRCASE_LANDING">Staircase Landing</option>
           <option value="ELEVATOR">Elevator</option>
-          <option value="ELEVATOR_LOBBY">Elevator Lobby</option>
           <option value="ESCALATOR">Escalator</option>
           <option value="RAMP">Ramp</option>
         </optgroup>
@@ -251,22 +285,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <div id="connect-form" style="display:none">
       <label for="new-conn-type">Connection Type</label>
       <select id="new-conn-type">
-        <option value="DOORWAY">Doorway</option>
-        <option value="WALKWAY">Walkway</option>
-        <option value="STAIRCASE_UP">Staircase Up</option>
-        <option value="STAIRCASE_DOWN">Staircase Down</option>
-        <option value="ELEVATOR_UP">Elevator Up</option>
-        <option value="ELEVATOR_DOWN">Elevator Down</option>
-        <option value="RAMP_UP">Ramp Up</option>
-        <option value="RAMP_DOWN">Ramp Down</option>
-        <option value="OUTDOOR_PATH">Outdoor Path</option>
-        <option value="BRIDGE">Bridge</option>
-        <option value="TUNNEL">Tunnel</option>
+        <option value="DOOR_STANDARD">Door (Standard)</option>
+        <option value="DOOR_AUTOMATIC">Door (Automatic)</option>
+        <option value="DOOR_LOCKED">Door (Locked)</option>
+        <option value="DOOR_EMERGENCY">Door (Emergency)</option>
+        <option value="PASSAGE">Passage</option>
+        <option value="OPEN">Open</option>
+        <option value="STAIRCASE">Staircase</option>
+        <option value="ELEVATOR">Elevator</option>
+        <option value="ESCALATOR">Escalator</option>
+        <option value="RAMP">Ramp</option>
       </select>
-      <div class="checkbox-row">
-        <input type="checkbox" id="new-conn-bidir" checked>
-        <label for="new-conn-bidir">Bidirectional</label>
-      </div>
       <div class="checkbox-row">
         <input type="checkbox" id="new-conn-accessible" checked>
         <label for="new-conn-accessible">Accessible</label>
@@ -352,11 +381,34 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 </div>
 
 <div id="info-overlay" class="modal-overlay" style="display:none">
-  <div class="modal" style="width:440px">
+  <div class="modal" style="width:480px;max-height:80vh;overflow-y:auto">
     <h2 id="info-title">Space Info</h2>
-    <div class="info-grid" id="info-grid"></div>
-    <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px">Connections</h3>
-    <div class="conn-list" id="info-connections"></div>
+    <div id="info-parent"></div>
+    <div class="info-tabs">
+      <div class="info-tab active" data-tab="details">Details</div>
+      <div class="info-tab" data-tab="images">Room Images</div>
+    </div>
+    <div id="tab-details" class="info-tab-content active">
+      <div class="info-grid" id="info-grid"></div>
+      <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px">Connections</h3>
+      <div class="conn-list" id="info-connections"></div>
+      <div id="info-subspaces"></div>
+    </div>
+    <div id="tab-images" class="info-tab-content">
+      <div id="info-room-summary"></div>
+      <div class="image-viewer" id="image-viewer">
+        <div id="image-viewer-content"></div>
+      </div>
+      <h3 style="font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:#888;margin-bottom:8px;margin-top:14px">Upload Images</h3>
+      <div class="room-upload-grid">
+        <label>North <input type="file" id="img-north" accept="image/*"></label>
+        <label>East <input type="file" id="img-east" accept="image/*"></label>
+        <label>South <input type="file" id="img-south" accept="image/*"></label>
+        <label>West <input type="file" id="img-west" accept="image/*"></label>
+      </div>
+      <button class="btn-primary" id="analyze-room-btn" style="margin-top:8px">Save Images</button>
+      <div id="analyze-status" style="font-size:12px;margin-top:6px;color:#888"></div>
+    </div>
     <div class="modal-buttons" style="margin-top:14px">
       <button class="btn-primary" id="info-save">Save</button>
       <button class="btn-secondary" id="info-close">Close</button>
@@ -385,12 +437,15 @@ const state = {
   currentBuildingId: null,
   hoveredSpace: null,
   // Edit mode
-  mode: 'select',      // 'select' | 'addSpace' | 'connect' | 'moveSpace'
+  mode: 'select',      // 'select' | 'addSpace' | 'connect' | 'moveSpace' | 'placeDuplicate'
   connectFrom: null,
   // Move mode
   moveSpace: null,
   moveOrigPoly: null,
   moveOrigCentroid: null,
+  // Duplicate placement mode
+  pendingDuplicate: null,
+  pendingDupOrigPoly: null,
   // Context menu
   contextMenu: null,
   // Snap indicators
@@ -417,8 +472,8 @@ const COLORS = {
   CORRIDOR:'#E0E0E0', CORRIDOR_SEGMENT:'#E0E0E0',
   LOBBY:'#D8D8D8', WAITING_AREA:'#D8D8D8', RECEPTION:'#D8D8D8',
   ENTRANCE:'#90EE90', ENTRANCE_SECONDARY:'#A8F0A8', EXIT_EMERGENCY:'#FFB3B3',
-  STAIRCASE:'#FFD699', STAIRCASE_LANDING:'#FFD699',
-  ELEVATOR:'#FFCC80', ELEVATOR_LOBBY:'#FFCC80',
+  STAIRCASE:'#FFD699',
+  ELEVATOR:'#FFCC80',
   ESCALATOR:'#FFD699', RAMP:'#FFD699',
   BRIDGE:'#FFD699', TUNNEL:'#D0D0D0', COVERED_WALKWAY:'#D8E8D8',
   OUTDOOR_PATH:'#C8F0C8', OUTDOOR_PLAZA:'#C8F0C8',
@@ -427,7 +482,15 @@ const COLORS = {
   CAFETERIA:'#FFEB99', CAFE:'#FFEB99', LIBRARY:'#FFEB99',
   GYM:'#FFEB99', AUDITORIUM:'#FFEB99', SHOP:'#FFEB99',
   INACCESSIBLE:'#808080', UNKNOWN:'#F0F0F0',
+  DOOR_STANDARD:'#D4A574', DOOR_AUTOMATIC:'#C9976A',
+  DOOR_LOCKED:'#BF8A60', DOOR_EMERGENCY:'#FF9999',
+  PASSAGE:'#E8D5C0',
+  OPEN:'#E0E0E0',
 };
+
+// Fetched from backend at startup via /api/v1/enums/space-types
+let SPACE_TYPES = [];
+let CONN_SPACE_TYPES = [];
 
 /* ═══════════════════════════════════════════════
    DOM References
@@ -643,7 +706,34 @@ function render() {
 
   // Draw spaces
   for (const space of state.spaces) {
-    if (!space.polygon || space.polygon.length < 3) continue;
+    const isConnType = space.space_type && (
+      space.space_type.startsWith('DOOR_') || space.space_type === 'PASSAGE' || space.space_type === 'OPEN'
+    );
+
+    if (!space.polygon || space.polygon.length < 3) {
+      // Draw connection nodes (doors/passages) as small rectangles at centroid
+      if (isConnType && space.centroid_x != null && space.centroid_y != null) {
+        const [cx, cy] = worldToCanvas(space.centroid_x, space.centroid_y);
+        const size = Math.max(4, effScale * 0.6);
+        const fill = COLORS[space.space_type] || '#D4A574';
+        ctx.save();
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = '#999';
+        ctx.lineWidth = 0.5;
+        ctx.fillRect(cx - size, cy - size/2, size * 2, size);
+        ctx.strokeRect(cx - size, cy - size/2, size * 2, size);
+        if (showLabels) {
+          const fontSize = Math.min(10, Math.max(7, effScale * 0.5));
+          ctx.font = `${fontSize}px -apple-system, sans-serif`;
+          ctx.fillStyle = '#666';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'top';
+          ctx.fillText(space.display_name || '', cx, cy + size/2 + 2);
+        }
+        ctx.restore();
+      }
+      continue;
+    }
 
     const isHovered = state.hoveredSpace && state.hoveredSpace.id === space.id;
     const isConnectFrom = state.mode === 'connect' && state.connectFrom && state.connectFrom.id === space.id;
@@ -651,7 +741,8 @@ function render() {
     let fill = COLORS[space.space_type] || '#F0F0F0';
     if (isHovered) fill = blendColor(fill, '#000000', 0.1);
 
-    drawPolygon(space.polygon, fill, '#999', 0.5);
+    const isSubspace = (space.z_index || 0) > 0;
+    drawPolygon(space.polygon, fill, isSubspace ? '#666' : '#999', isSubspace ? 1.0 : 0.5);
 
     if (isConnectFrom) drawPolygon(space.polygon, null, '#ff9500', 3);
 
@@ -668,6 +759,28 @@ function render() {
       const maxW = effScale * 3;
       ctx.fillText(name.length > 20 ? name.slice(0, 18) + '..' : name, lx, ly, maxW);
       ctx.restore();
+    }
+
+    // Vertical connection indicators
+    if (effScale > 1 && space.vertical_connections && space.vertical_connections.length > 0 && state.currentFloorIndex != null) {
+      const vc = space.vertical_connections;
+      const hasUp = vc.some(c => c.to_floor_index > state.currentFloorIndex);
+      const hasDown = vc.some(c => c.to_floor_index < state.currentFloorIndex);
+      if (hasUp || hasDown) {
+        // Compute bounding box top-right from polygon
+        let maxX = -Infinity, minY = Infinity;
+        for (const pt of space.polygon) { if (pt[0] > maxX) maxX = pt[0]; if (pt[1] < minY) minY = pt[1]; }
+        const [bx, by] = worldToCanvas(maxX, minY);
+        const label = (hasUp && hasDown) ? '\u25B2\u25BC' : hasUp ? '\u25B2' : '\u25BC';
+        const fs = Math.min(12, Math.max(8, effScale * 0.7));
+        ctx.save();
+        ctx.font = `bold ${fs}px sans-serif`;
+        ctx.fillStyle = '#FF6B00';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText(label, bx - 2, by + 2);
+        ctx.restore();
+      }
     }
   }
 
@@ -767,6 +880,18 @@ function pointInPolygon(px, py, polygon) {
 
 function hitTest(canvasX, canvasY) {
   const [wx, wy] = canvasToWorld(canvasX, canvasY);
+  // Check door/passage nodes by centroid proximity
+  for (let i = state.spaces.length - 1; i >= 0; i--) {
+    const s = state.spaces[i];
+    if ((!s.polygon || s.polygon.length < 3) &&
+        s.space_type && (s.space_type.startsWith('DOOR_') || s.space_type === 'PASSAGE') &&
+        s.centroid_x != null && s.centroid_y != null) {
+      const dx = Math.abs(wx - s.centroid_x);
+      const dy = Math.abs(wy - s.centroid_y);
+      if (dx < 1.5 && dy < 1.0) return s;
+    }
+  }
+  // Existing polygon hit test
   for (let i = state.spaces.length - 1; i >= 0; i--) {
     const s = state.spaces[i];
     if (!s.polygon || s.polygon.length < 3) continue;
@@ -801,16 +926,42 @@ canvas.addEventListener('mousemove', e => {
   // Move mode: update space position with snapping
   if (state.mode === 'moveSpace' && state.moveSpace) {
     const [rawWx, rawWy] = canvasToWorld(mx, my);
-    const origBB = getSpaceBBox({ polygon: state.moveOrigPoly });
-    const halfW = (origBB.maxX - origBB.minX) / 2;
-    const halfH = (origBB.maxY - origBB.minY) / 2;
-    const [sx, sy] = applySnap(rawWx, rawWy, halfW, halfH, state.moveSpace.id);
-    const dx = sx - state.moveOrigCentroid[0];
-    const dy = sy - state.moveOrigCentroid[1];
-    state.moveSpace.polygon = state.moveOrigPoly.map(([px, py]) => [px + dx, py + dy]);
-    state.moveSpace.centroid_x = sx;
-    state.moveSpace.centroid_y = sy;
+    if (state.moveOrigPoly) {
+      const origBB = getSpaceBBox({ polygon: state.moveOrigPoly });
+      const halfW = (origBB.maxX - origBB.minX) / 2;
+      const halfH = (origBB.maxY - origBB.minY) / 2;
+      const [sx, sy] = applySnap(rawWx, rawWy, halfW, halfH, state.moveSpace.id);
+      const dx = sx - state.moveOrigCentroid[0];
+      const dy = sy - state.moveOrigCentroid[1];
+      state.moveSpace.polygon = state.moveOrigPoly.map(([px, py]) => [px + dx, py + dy]);
+      state.moveSpace.centroid_x = sx;
+      state.moveSpace.centroid_y = sy;
+    } else {
+      state.moveSpace.centroid_x = rawWx;
+      state.moveSpace.centroid_y = rawWy;
+    }
     render();
+    return;
+  }
+
+  // Duplicate placement mode: ghost polygon follows cursor
+  if (state.mode === 'placeDuplicate' && state.pendingDuplicate) {
+    const [rawWx, rawWy] = canvasToWorld(mx, my);
+    const relPoly = state.pendingDupOrigPoly;
+    const bb = getSpaceBBox({ polygon: relPoly.map(([rx, ry]) => [rx + rawWx, ry + rawWy]) });
+    const halfW = (bb.maxX - bb.minX) / 2;
+    const halfH = (bb.maxY - bb.minY) / 2;
+    const [sx, sy] = applySnap(rawWx, rawWy, halfW, halfH, null);
+    state.pendingDuplicate.centroid_x = sx;
+    state.pendingDuplicate.centroid_y = sy;
+    state.pendingDuplicate.polygon = relPoly.map(([rx, ry]) => [rx + sx, ry + sy]);
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
+    tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
+    tooltip.textContent = `${sx.toFixed(1)}, ${sy.toFixed(1)} m`;
+    render();
+    const color = COLORS[state.pendingDuplicate.space_type] || '#F0F0F0';
+    drawPolygon(state.pendingDuplicate.polygon, blendColor(color, '#ffffff', 0.4), '#4a90d9', 2);
     return;
   }
 
@@ -854,6 +1005,12 @@ canvas.addEventListener('mouseup', e => {
   // Move mode: click to place
   if (state.mode === 'moveSpace' && state.moveSpace) {
     finishMove();
+    return;
+  }
+
+  // Duplicate placement mode: click to place
+  if (state.mode === 'placeDuplicate' && state.pendingDuplicate) {
+    finishDuplicatePlace();
     return;
   }
 
@@ -1021,14 +1178,20 @@ async function loadFloorConnections(floorId) {
   }
 }
 
-function flattenSpaces(spaces) {
+function flattenSpaces(spaces, depth) {
+  depth = depth || 0;
   const result = [];
   for (const s of spaces) {
+    if (s.z_index == null) s.z_index = depth;
+    if (s.subspaces && s.subspaces.length) {
+      s.child_spaces = s.subspaces.map(sub => ({ id: sub.id, name: sub.display_name }));
+    }
     result.push(s);
     if (s.subspaces && s.subspaces.length) {
-      result.push(...flattenSpaces(s.subspaces));
+      result.push(...flattenSpaces(s.subspaces, depth + 1));
     }
   }
+  if (depth === 0) result.sort((a, b) => (a.z_index || 0) - (b.z_index || 0));
   return result;
 }
 
@@ -1383,11 +1546,23 @@ async function handleAddSpaceClick(canvasX, canvasY) {
   const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
   state.snapLines = [];
 
+  // Auto-detect parent: find the most nested space containing the click point
+  let parentSpaceId = null;
+  let bestZIndex = -1;
+  for (const s of state.spaces) {
+    if (!s.polygon || s.polygon.length < 3) continue;
+    if (pointInPolygon(wx, wy, s.polygon) && (s.z_index || 0) > bestZIndex) {
+      parentSpaceId = s.id;
+      bestZIndex = s.z_index || 0;
+    }
+  }
+
   const spaceData = {
     id: uuid(),
     display_name: name,
     space_type: $('new-space-type').value,
     floor_id: state.selectedFloorId,
+    parent_space_id: parentSpaceId,
     building_id: state.selectedBuildingId,
     campus_id: state.selectedCampusId,
     floor_index: state.currentFloorIndex,
@@ -1438,25 +1613,16 @@ async function handleConnectClick(canvasX, canvasY) {
     return;
   }
 
-  const connType = $('new-conn-type').value;
-  const bidir = $('new-conn-bidir').checked;
+  const spaceType = $('new-conn-type').value;
   const accessible = $('new-conn-accessible').checked;
   const from = state.connectFrom;
-
-  const dist = Math.sqrt(
-    Math.pow((space.centroid_x || 0) - (from.centroid_x || 0), 2) +
-    Math.pow((space.centroid_y || 0) - (from.centroid_y || 0), 2)
-  );
-  const weight = dist / 1.4;
 
   const connData = {
     from_space_id: from.id,
     to_space_id: space.id,
-    connection_type: connType,
-    weight: weight,
-    distance_m: dist,
+    space_type: spaceType,
+    display_name: spaceType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
     is_accessible: accessible,
-    door_type: 'NONE',
   };
 
   try {
@@ -1466,37 +1632,17 @@ async function handleConnectClick(canvasX, canvasY) {
       body: JSON.stringify(connData),
     });
 
-    if (bidir) {
-      const reverseType = getReverse(connType);
-      await api('/connections', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...connData, from_space_id: space.id, to_space_id: from.id, connection_type: reverseType }),
-      });
-    }
-
     notify(`Connected "${from.display_name}" to "${space.display_name}"`);
     state.connectFrom = null;
     $('connect-status').textContent = 'Click the first space (start), then click the second space (end).';
     $('connect-status').className = 'tool-hint';
 
-    // Refresh connections
-    if (state.selectedFloorId) await loadFloorConnections(state.selectedFloorId);
-    render();
+    // Refresh floor display (door nodes appear as spaces now)
+    await reloadCurrentFloor();
 
     // Refresh GDS projection
     api('/navigate/refresh-graph', { method: 'POST' }).catch(() => {});
   } catch (e) { /* handled */ }
-}
-
-function getReverse(connType) {
-  const map = {
-    STAIRCASE_UP: 'STAIRCASE_DOWN', STAIRCASE_DOWN: 'STAIRCASE_UP',
-    ELEVATOR_UP: 'ELEVATOR_DOWN', ELEVATOR_DOWN: 'ELEVATOR_UP',
-    ESCALATOR_UP: 'ESCALATOR_DOWN', ESCALATOR_DOWN: 'ESCALATOR_UP',
-    RAMP_UP: 'RAMP_DOWN', RAMP_DOWN: 'RAMP_UP',
-  };
-  return map[connType] || connType;
 }
 
 /* ═══════════════════════════════════════════════
@@ -1545,9 +1691,96 @@ $('ctx-delete').addEventListener('click', () => {
 /* ═══════════════════════════════════════════════
    Info Modal (Editable)
    ═══════════════════════════════════════════════ */
+/* ── Info Modal Tabs ── */
+document.querySelectorAll('.info-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.info-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.info-tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    $('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+function renderRoomSummary(data) {
+  const el = $('info-room-summary');
+  const counts = data.room_object_counts || data.room_object_counts_json;
+  const textCounts = data.room_text_counts || data.room_text_counts_json;
+  const hasObjects = counts && Object.keys(counts).length;
+  const hasText = textCounts && Object.keys(textCounts).length;
+  if (!hasObjects && !hasText) {
+    el.innerHTML = '<span style="color:#aaa">No room analysis yet</span>';
+    return;
+  }
+  const renderTags = (entries) =>
+    '<div class="room-objects-list">' +
+    entries.map(([k, v]) =>
+      `<span class="room-obj-tag">${k.replace(/_/g, ' ')} (${v})</span>`
+    ).join('') + '</div>';
+
+  let html = '';
+  if (hasObjects) {
+    html += renderTags(Object.entries(counts));
+  }
+  if (hasText) {
+    html += renderTags(Object.entries(textCounts));
+  }
+  el.innerHTML = html;
+}
+
+function renderImageViewer(space) {
+  const container = $('image-viewer-content');
+  const images = space.room_images
+    || space.metadata?.room_summary?.room_images;
+  const views = space.stored_views || space.metadata?.room_summary?.stored_views;
+  const updatedAt = space.room_summary_updated_at || space.metadata?.room_summary?.updated_at;
+
+  if (!images || !images.length) {
+    container.innerHTML = '<div style="color:#aaa;font-size:13px;padding:8px 0">No images stored for this space. Upload images below and click "Analyze Room" to store them.</div>';
+    return;
+  }
+
+  // Map views to direction labels
+  const directions = views || [];
+  const dirLabels = ['North', 'East', 'South', 'West'];
+
+  let html = '<div class="image-viewer-grid">';
+  for (let i = 0; i < images.length; i++) {
+    const label = directions[i] ? directions[i].charAt(0).toUpperCase() + directions[i].slice(1) : (dirLabels[i] || `View ${i + 1}`);
+    const svgContent = images[i];
+    html += `
+      <div class="image-viewer-card">
+        <div class="iv-label">${label}</div>
+        <div class="iv-body">${svgContent}</div>
+      </div>`;
+  }
+  html += '</div>';
+
+  // Metadata section
+  html += '<div class="image-meta">';
+  html += `<div class="meta-row"><span class="meta-label">Images stored</span><span class="meta-value">${images.length}</span></div>`;
+  if (directions.length) {
+    html += `<div class="meta-row"><span class="meta-label">Views</span><span class="meta-value">${directions.join(', ')}</span></div>`;
+  }
+  if (updatedAt) {
+    const d = new Date(updatedAt);
+    const formatted = isNaN(d.getTime()) ? updatedAt : d.toLocaleString();
+    html += `<div class="meta-row"><span class="meta-label">Last updated</span><span class="meta-value">${formatted}</span></div>`;
+  }
+  html += '</div>';
+
+  container.innerHTML = html;
+}
+
 async function showInfoModal(space) {
   state._editingSpace = space;
   $('info-title').textContent = space.display_name || 'Space Info';
+
+  // Reset to Details tab
+  document.querySelectorAll('.info-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.info-tab-content').forEach(c => c.classList.remove('active'));
+  document.querySelector('.info-tab[data-tab="details"]').classList.add('active');
+  $('tab-details').classList.add('active');
+
   const grid = $('info-grid');
 
   // Compute width/height from bounding box
@@ -1555,16 +1788,41 @@ async function showInfoModal(space) {
   const spaceW = bb ? (bb.maxX - bb.minX).toFixed(2) : '0';
   const spaceH = bb ? (bb.maxY - bb.minY).toFixed(2) : '0';
 
+  const typeOptions = SPACE_TYPES.map(t =>
+    `<option value="${t}"${t === space.space_type ? ' selected' : ''}>${t.replace(/_/g, ' ')}</option>`
+  ).join('');
+
   grid.innerHTML = `
     <span class="lbl">Name</span><input class="val-input" id="info-name" value="${(space.display_name || '').replace(/"/g, '&quot;')}">
-    <span class="lbl">Type</span><span class="val">${(space.space_type || '').replace(/_/g, ' ')}</span>
+    <span class="lbl">Type</span><select class="val-input" id="info-type">${typeOptions}</select>
     <span class="lbl">Width (m)</span><input class="val-input" id="info-width" type="number" step="0.1" value="${spaceW}">
     <span class="lbl">Height (m)</span><input class="val-input" id="info-height" type="number" step="0.1" value="${spaceH}">
     <span class="lbl">X</span><input class="val-input" id="info-cx" type="number" step="0.1" value="${(space.centroid_x||0).toFixed(2)}">
     <span class="lbl">Y</span><input class="val-input" id="info-cy" type="number" step="0.1" value="${(space.centroid_y||0).toFixed(2)}">
-    <span class="lbl">Accessible</span><span class="val">${space.is_accessible ? 'Yes' : 'No'}</span>
+    <span class="lbl">Accessible</span><span class="val"><input type="checkbox" id="info-accessible" ${space.is_accessible ? 'checked' : ''}></span>
   `;
 
+  // Parent indicator
+  const parentDiv = $('info-parent');
+  if (space.parent_space_id) {
+    parentDiv.innerHTML = `<div style="margin-bottom:10px;padding:6px 10px;background:#f0f7ff;border-radius:6px;font-size:13px">Subspace of: <a href="#" class="parent-link" data-id="${space.parent_space_id}">${space.parent_space_name || space.parent_space_id}</a></div>`;
+    parentDiv.querySelector('.parent-link').addEventListener('click', (e) => {
+      e.preventDefault();
+      const parent = state.spaces.find(s => s.id === space.parent_space_id);
+      if (parent) showInfoModal(parent);
+    });
+  } else {
+    parentDiv.innerHTML = '';
+  }
+
+  // Room images tab
+  renderRoomSummary(space);
+  renderImageViewer(space);
+  ['img-north','img-east','img-south','img-west'].forEach(id => { $(id).value = ''; });
+  $('analyze-status').textContent = '';
+  $('analyze-room-btn').disabled = false;
+
+  // Connections
   const connDiv = $('info-connections');
   connDiv.innerHTML = '<span style="color:#aaa">Loading...</span>';
   $('info-overlay').style.display = 'flex';
@@ -1574,16 +1832,42 @@ async function showInfoModal(space) {
     if (!conns.length) {
       connDiv.innerHTML = '<span style="color:#aaa">No connections</span>';
     } else {
-      connDiv.innerHTML = conns.map(c => `
-        <div class="conn-item">
-          <span class="conn-dir">${c.direction === 'outgoing' ? '&#8594;' : '&#8592;'}</span>
-          <span>${c.other_space_name || c.other_space_id}</span>
-          <span style="color:#999;margin-left:auto;font-size:11px">${(c.connection_type || '').replace(/_/g, ' ').toLowerCase()}</span>
-        </div>
-      `).join('');
+      connDiv.innerHTML = conns.map(c => {
+        const doorOpts = CONN_SPACE_TYPES.map(t =>
+          `<option value="${t}"${t === c.door_type ? ' selected' : ''}>${t.replace(/_/g, ' ')}</option>`
+        ).join('');
+        return `
+          <div class="conn-item">
+            <span class="conn-dir">&#8594;</span>
+            <span>${c.other_space_name || c.other_space_id}</span>
+            <div class="conn-controls">
+              <select class="conn-type-select" data-door-id="${c.door_node_id}">${doorOpts}</select>
+              <label><input type="checkbox" class="conn-accessible-check" data-door-id="${c.door_node_id}" ${c.door_accessible ? 'checked' : ''}> Accessible</label>
+            </div>
+          </div>
+        `;
+      }).join('');
     }
   } catch (e) {
     connDiv.innerHTML = '<span style="color:#d9534f">Failed to load connections</span>';
+  }
+
+  // Subspaces
+  const subDiv = $('info-subspaces');
+  if (space.child_spaces && space.child_spaces.length) {
+    subDiv.innerHTML = `<h3>Subspaces</h3>` +
+      space.child_spaces.map(cs =>
+        `<div class="subspace-item"><a href="#" class="subspace-link" data-id="${cs.id}">${cs.name || cs.id}</a></div>`
+      ).join('');
+    subDiv.querySelectorAll('.subspace-link').forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const child = state.spaces.find(s => s.id === link.dataset.id);
+        if (child) showInfoModal(child);
+      });
+    });
+  } else {
+    subDiv.innerHTML = '';
   }
 }
 
@@ -1612,15 +1896,74 @@ $('info-save').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         display_name: newName,
+        space_type: $('info-type').value,
+        is_accessible: $('info-accessible').checked,
         centroid_x: newCx,
         centroid_y: newCy,
         polygon: newPoly,
       }),
     });
+
+    // Save connection (door node) edits
+    const connSaves = [...document.querySelectorAll('.conn-type-select')].map(sel => {
+      const doorId = sel.dataset.doorId;
+      const check = document.querySelector(`.conn-accessible-check[data-door-id="${doorId}"]`);
+      return api(`/spaces/${doorId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ space_type: sel.value, is_accessible: check?.checked ?? true }),
+      });
+    });
+    await Promise.all(connSaves);
+
     notify(`Updated "${newName}"`);
     $('info-overlay').style.display = 'none';
     await reloadCurrentFloor();
   } catch (e) { /* handled */ }
+});
+
+$('analyze-room-btn').addEventListener('click', async () => {
+  const space = state._editingSpace;
+  if (!space) return;
+  const north = $('img-north').files[0];
+  const east  = $('img-east').files[0];
+  const south = $('img-south').files[0];
+  const west  = $('img-west').files[0];
+  if (!north || !east || !south || !west) {
+    notify('Please select all 4 directional images (N/E/S/W)', 'error');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('room_name', space.display_name || space.id);
+  fd.append('north_image', north);
+  fd.append('east_image', east);
+  fd.append('south_image', south);
+  fd.append('west_image', west);
+
+  $('analyze-status').textContent = 'Analyzing images...';
+  $('analyze-room-btn').disabled = true;
+  try {
+    const result = await api('/room-summary/room-objects/setup', { method: 'POST', body: fd });
+    renderRoomSummary(result);
+
+    // Reload floor data to get the stored room_images from Neo4j
+    const spaceId = space.id;
+    await reloadCurrentFloor();
+    const updatedSpace = state.spaces.find(s => s.id === spaceId);
+    if (updatedSpace) {
+      state._editingSpace = updatedSpace;
+      renderImageViewer(updatedSpace);
+    } else {
+      renderImageViewer(result);
+    }
+
+    $('analyze-status').textContent = '';
+    notify('Room analysis complete');
+  } catch (e) {
+    $('analyze-status').textContent = 'Analysis failed';
+  } finally {
+    $('analyze-room-btn').disabled = false;
+  }
 });
 
 $('info-close').addEventListener('click', () => {
@@ -1636,7 +1979,7 @@ $('info-overlay').addEventListener('click', e => {
 function startMoveMode(space) {
   state.mode = 'moveSpace';
   state.moveSpace = space;
-  state.moveOrigPoly = space.polygon.map(p => [...p]);
+  state.moveOrigPoly = space.polygon ? space.polygon.map(p => [...p]) : null;
   state.moveOrigCentroid = [space.centroid_x, space.centroid_y];
   canvas.classList.add('crosshair');
   for (const btn of document.querySelectorAll('.tool-bar button')) {
@@ -1651,18 +1994,16 @@ async function finishMove() {
   if (!space) return;
   state.snapLines = [];
   try {
+    const body = { centroid_x: space.centroid_x, centroid_y: space.centroid_y };
+    if (space.polygon) body.polygon = space.polygon;
     await api(`/spaces/${space.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        polygon: space.polygon,
-        centroid_x: space.centroid_x,
-        centroid_y: space.centroid_y,
-      }),
+      body: JSON.stringify(body),
     });
     notify(`Moved "${space.display_name}"`);
   } catch (e) {
-    space.polygon = state.moveOrigPoly;
+    if (state.moveOrigPoly) space.polygon = state.moveOrigPoly;
     space.centroid_x = state.moveOrigCentroid[0];
     space.centroid_y = state.moveOrigCentroid[1];
   }
@@ -1693,14 +2034,12 @@ function exitMoveMode() {
 /* ═══════════════════════════════════════════════
    Duplicate Space
    ═══════════════════════════════════════════════ */
-async function duplicateSpace(space) {
-  const bb = getSpaceBBox(space);
-  if (!bb) return;
-  const bbW = bb.maxX - bb.minX;
-  const offset = gridSnap(bbW + 1);
-  const newPoly = space.polygon.map(([x, y]) => [x + offset, y]);
-  const newCx = (space.centroid_x || 0) + offset;
-  const newCy = space.centroid_y || 0;
+function duplicateSpace(space) {
+  const cx = space.centroid_x || 0;
+  const cy = space.centroid_y || 0;
+
+  // Compute polygon offsets relative to centroid
+  const relPoly = space.polygon.map(([x, y]) => [x - cx, y - cy]);
 
   const spaceData = {
     id: uuid(),
@@ -1710,22 +2049,48 @@ async function duplicateSpace(space) {
     building_id: state.selectedBuildingId || space.building_id,
     campus_id: state.selectedCampusId || space.campus_id,
     floor_index: state.currentFloorIndex,
-    centroid_x: newCx,
-    centroid_y: newCy,
-    polygon: newPoly,
+    centroid_x: cx,
+    centroid_y: cy,
+    polygon: space.polygon.map(p => [...p]),
     is_accessible: space.is_accessible ?? true,
     is_navigable: space.is_navigable ?? true,
     is_outdoor: space.is_outdoor ?? false,
     tags: space.tags || [],
   };
 
+  state.pendingDuplicate = spaceData;
+  state.pendingDupOrigPoly = relPoly;
+  state.mode = 'placeDuplicate';
+  canvas.classList.add('crosshair');
+  for (const btn of document.querySelectorAll('.tool-bar button')) {
+    btn.classList.remove('active');
+  }
+  $('add-space-form').style.display = 'none';
+  $('connect-form').style.display = 'none';
+}
+
+function exitDuplicatePlaceMode() {
+  state.pendingDuplicate = null;
+  state.pendingDupOrigPoly = null;
+  state.snapLines = [];
+  state.mode = 'select';
+  canvas.classList.remove('crosshair');
+  $('tool-select').classList.add('active');
+  tooltip.style.display = 'none';
+  render();
+}
+
+async function finishDuplicatePlace() {
+  const spaceData = state.pendingDuplicate;
+  if (!spaceData) return;
+  exitDuplicatePlaceMode();
   try {
     await api('/spaces', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(spaceData),
     });
-    notify(`Duplicated "${space.display_name}"`);
+    notify(`Duplicated "${spaceData.display_name}"`);
     await reloadCurrentFloor();
   } catch (e) { /* handled */ }
 }
@@ -1749,6 +2114,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (state.mode === 'moveSpace') {
       cancelMove();
+    }
+    if (state.mode === 'placeDuplicate') {
+      exitDuplicatePlaceMode();
     }
     hideContextMenu();
     $('info-overlay').style.display = 'none';
@@ -1869,6 +2237,14 @@ async function loadCampuses() {
   }
 }
 
+async function loadSpaceTypes() {
+  try {
+    const data = await api('/enums/space-types');
+    SPACE_TYPES = data.space_types || [];
+    CONN_SPACE_TYPES = data.connection_types || [];
+  } catch (e) { /* keep empty defaults */ }
+}
+
 async function init() {
   resizeCanvas();
   window.addEventListener('resize', () => {
@@ -1876,6 +2252,7 @@ async function init() {
     if (state.bounds) fitToCanvas();
     render();
   });
+  await loadSpaceTypes();
   await loadCampuses();
   if (state.campuses.length === 1) {
     $('campus-select').value = state.campuses[0].id;

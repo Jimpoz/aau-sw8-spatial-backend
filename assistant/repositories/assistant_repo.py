@@ -263,6 +263,49 @@ class AssistantRepository:
 
         return None
 
+    def search_spaces_on_floor(
+        self,
+        campus_id: str,
+        floor_index: int,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Return all navigable spaces on a specific floor, with their building/floor context."""
+        cypher_query = """
+        MATCH (building:Building)-[:HAS_FLOOR]->(floor:Floor)-[:HAS_SPACE]->(space:Space)
+        WHERE space.campus_id = $campus_id
+          AND floor.floor_index = $floor_index
+          AND space.is_navigable = true
+        OPTIONAL MATCH (space)-[r:CONNECTS_TO]-(neighbor:Space)
+        RETURN
+            space.display_name AS name,
+            space.space_type AS type,
+            floor.display_name AS floor_name,
+            floor.floor_index AS floor_index,
+            building.name AS building_name,
+            collect(CASE WHEN neighbor IS NOT NULL THEN {
+                name: neighbor.display_name,
+                connection_type: type(r)
+            } ELSE null END) AS connected_to
+        ORDER BY space.display_name ASC
+        LIMIT $limit
+        """
+        records = self.db.execute(
+            cypher_query,
+            {"campus_id": campus_id, "floor_index": floor_index, "limit": limit},
+        )
+        results = []
+        for record in records:
+            connections = [c for c in record["connected_to"] if c is not None]
+            results.append({
+                "name": record["name"],
+                "type": record["type"],
+                "floor_name": record["floor_name"],
+                "floor_index": record["floor_index"],
+                "building_name": record["building_name"],
+                "connected_to": connections,
+            })
+        return results
+
     def get_main_entrance(self, campus_id: str) -> dict | None:
         return self.get_anchor_space(
             campus_id,

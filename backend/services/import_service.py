@@ -2,7 +2,6 @@ from db import Database
 from models.map_import import MapImportSchema, SpaceImport, ConnectionImport
 from models.campus import CampusCreate, BuildingCreate, FloorCreate
 from models.space import SpaceCreate
-from models.connection import ConnectionCreate
 from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
 from repositories.connection_repo import ConnectionRepository
@@ -10,7 +9,7 @@ from services.geometry_service import (
     centroid_from_polygon,
     area_from_polygon,
     distance_m,
-    compute_weight,
+    compute_traversal_cost,
     local_to_global_coordinates,
     polygon_local_to_global,
 )
@@ -101,10 +100,10 @@ class ImportService:
                 parent_id=None,
             )
 
-        # 4. Connections
+        # 4. Connection nodes
         counts = {"spaces": len(self._centroids), "connections": 0}
         for conn in campus.connections:
-            self._import_connection(conn)
+            self._import_connection_node(conn)
             counts["connections"] += 1
 
         return {
@@ -155,8 +154,15 @@ class ImportService:
                     )
             
         text_to_embed = f"{space.display_name}. Type: {space.space_type}. Tags: {' '.join(space.tags)}"
-        
-        vector = embedder.encode(text_to_embed).tolist()
+
+        vector = embedder.encode([text_to_embed])[0].tolist()
+
+        traversal_cost = compute_traversal_cost(
+            space.space_type.value if hasattr(space.space_type, 'value') else str(space.space_type),
+            space.width_m,
+            space.length_m,
+            None,
+        )
 
         self.space_repo.create_space(
             SpaceCreate(
@@ -185,6 +191,7 @@ class ImportService:
                 tags=space.tags,
                 metadata=space.metadata,
                 embedding=vector,
+                traversal_cost=traversal_cost,
             )
         )
 
@@ -223,29 +230,5 @@ class ImportService:
                 parent_id=space.id,
             )
 
-    def _import_connection(self, conn: ConnectionImport) -> None:
-        weight = conn.weight_override
-        dist: float | None = None
-
-        if weight is None:
-            c_from = self._centroids.get(conn.from_space_id)
-            c_to = self._centroids.get(conn.to_space_id)
-            if c_from and c_to:
-                dist = distance_m(c_from[0], c_from[1], c_to[0], c_to[1])
-            weight = compute_weight(
-                conn.connection_type.value, dist, conn.transition_time_s
-            )
-
-        self.conn_repo.create_connection(
-            ConnectionCreate(
-                from_space_id=conn.from_space_id,
-                to_space_id=conn.to_space_id,
-                connection_type=conn.connection_type,
-                weight=weight,
-                distance_m=dist,
-                is_accessible=conn.is_accessible,
-                door_type=conn.door_type,
-                requires_access_level=conn.requires_access_level,
-                transition_time_s=conn.transition_time_s,
-            )
-        )
+    def _import_connection_node(self, conn: ConnectionImport) -> None:
+        self.conn_repo.create_connection(conn.from_space_id, conn.to_space_id)

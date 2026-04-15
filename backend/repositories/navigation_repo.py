@@ -19,23 +19,19 @@ RETURN
         building_id: n.building_id,
         campus_id: n.campus_id,
         centroid_x: n.centroid_x,
-        centroid_y: n.centroid_y
+        centroid_y: n.centroid_y,
+        traversal_cost: n.traversal_cost
     }] AS path_nodes,
-    [r IN relationships(path) | {
-        connection_type: r.connection_type,
-        weight: r.weight,
-        distance_m: r.distance_m,
-        is_accessible: r.is_accessible
-    }] AS path_rels,
     totalCost
 """
 
 _NATIVE_QUERY = """
 MATCH (start:Space {id: $from_id}), (end:Space {id: $to_id})
 MATCH path = shortestPath(
-    (start)-[c:CONNECTS_TO*..100 WHERE ($accessible_only = false OR c.is_accessible = true)]->(end)
+    (start)-[:CONNECTS_TO*..100]->(end)
 )
 WHERE ALL(n IN nodes(path) WHERE n.is_navigable = true OR n.id IN [$from_id, $to_id])
+    AND ($accessible_only = false OR ALL(n IN nodes(path) WHERE n.is_accessible = true))
 RETURN
     [n IN nodes(path) | {
         id: n.id,
@@ -45,15 +41,10 @@ RETURN
         building_id: n.building_id,
         campus_id: n.campus_id,
         centroid_x: n.centroid_x,
-        centroid_y: n.centroid_y
+        centroid_y: n.centroid_y,
+        traversal_cost: n.traversal_cost
     }] AS path_nodes,
-    [r IN relationships(path) | {
-        connection_type: r.connection_type,
-        weight: r.weight,
-        distance_m: r.distance_m,
-        is_accessible: r.is_accessible
-    }] AS path_rels,
-    reduce(cost = 0.0, r IN relationships(path) | cost + coalesce(r.weight, 0.0)) AS totalCost
+    reduce(cost = 0.0, n IN nodes(path) | cost + coalesce(n.traversal_cost, 0.0)) AS totalCost
 LIMIT 1
 """
 
@@ -69,7 +60,7 @@ class NavigationRepository:
         accessible_only: bool = False,
         gds_projection: str = "navigation-graph",
     ) -> dict:
-        """Return {path_nodes, path_rels, total_cost} or raise NavigationError."""
+        """Return {path_nodes, total_cost} or raise NavigationError."""
         # Verify both spaces exist
         for space_id in (from_id, to_id):
             check = self.db.execute(
@@ -90,7 +81,6 @@ class NavigationRepository:
                     row = result[0]
                     return {
                         "path_nodes": row["path_nodes"],
-                        "path_rels": row["path_rels"],
                         "total_cost": row["totalCost"],
                     }
             except Exception:
@@ -109,6 +99,5 @@ class NavigationRepository:
         row = result[0]
         return {
             "path_nodes": row["path_nodes"],
-            "path_rels": row["path_rels"],
             "total_cost": row["totalCost"],
         }

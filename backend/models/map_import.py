@@ -1,6 +1,6 @@
 from typing import Optional, Union
 from pydantic import BaseModel, Field, validator
-from models.enums import ConnectionType, DoorType, SpaceType
+from shared.models.enums import ConnectionType, DoorType, SpaceType
 
 
 class SpaceImport(BaseModel):
@@ -90,6 +90,8 @@ class ConnectionImport(BaseModel):
         if v is None or isinstance(v, DoorType):
             return v
         if isinstance(v, str):
+            if v.upper() == "NONE":
+                return None
             return DoorType(v)
         return v
 

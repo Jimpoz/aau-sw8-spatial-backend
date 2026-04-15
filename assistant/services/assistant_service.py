@@ -180,6 +180,32 @@ class AssistantService:
         _embed_cache_put(text, vec)
         return vec
 
+    def _floor_intent(self, user_query: str) -> int | None:
+        """
+        Returns the floor_index if the query is asking about a specific floor, else None.
+        Handles ordinals (1st, 2nd, 5th), cardinals (floor 5), and named floors (ground floor).
+        """
+        q = user_query.lower()
+
+        named = {
+            "ground": 0, "stue": 0, "basement": -1,
+            "first": 1, "second": 2, "third": 3, "fourth": 4,
+            "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
+        }
+        for word, idx in named.items():
+            if re.search(rf"\b{word}\b", q):
+                return idx
+
+        # "5th floor", "floor 5", "level 5"
+        m = re.search(r"\b(\d+)(?:st|nd|rd|th)?\s+(?:floor|level)\b", q)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"\b(?:floor|level)\s+(\d+)\b", q)
+        if m:
+            return int(m.group(1))
+
+        return None
+
     # Depending on the question search all the spaces or only subset of spaces
     def _needs_global_map(self, user_query: str) -> bool:
         q = user_query.lower().strip()
@@ -257,23 +283,39 @@ class AssistantService:
                     "sources": [res.get("anchor_name", "Main entrance"), res["target_name"]],
                 }
 
-        query_vector = await self._encode_query(user_query)
+        floor_idx = self._floor_intent(user_query)
 
-        similar_spaces = self.repo.search_similar_spaces(campus_id, query_vector, limit=10)
-
-        context_lines = []
-        for s in similar_spaces:
-            location = f"located on {s.get('floor_name', 'an unknown floor')} in the {s.get('building_name', 'unknown building')}."
-            connections = s.get('connected_to', [])
-            if connections:
-                conn_show = connections[:6]
-                conn_str = ", ".join([f"{c.get('name', '?')} (via {c.get('connection_type', '?')})" for c in conn_show])
-                more = "" if len(connections) <= len(conn_show) else f" (+{len(connections)-len(conn_show)} more)"
-                graph_context = f" It directly connects to: {conn_str}{more}."
+        if floor_idx is not None:
+            spaces = self.repo.search_spaces_on_floor(campus_id, floor_idx, limit=20)
+            if spaces:
+                floor_label = spaces[0].get("floor_name") or f"floor {floor_idx}"
+                building_label = spaces[0].get("building_name", "the building")
+                context_lines = [
+                    f"The following spaces are on {floor_label} (floor index {floor_idx}) in {building_label}:"
+                ]
+                for s in spaces:
+                    context_lines.append(f"- {s.get('name', '?')} ({s.get('type', 'space')})")
+                context_text = "\n".join(context_lines)
             else:
-                graph_context = " It has no mapped connections."
-            context_lines.append(f"- {s.get('name','?')} ({s.get('type','space')}) is {location}{graph_context}")
-        context_text = "\n".join(context_lines)
+                context_text = f"No spaces found on floor index {floor_idx} for this campus."
+            similar_spaces = spaces
+        else:
+            query_vector = await self._encode_query(user_query)
+            similar_spaces = self.repo.search_similar_spaces(campus_id, query_vector, limit=10)
+
+            context_lines = []
+            for s in similar_spaces:
+                location = f"located on {s.get('floor_name', 'an unknown floor')} in the {s.get('building_name', 'unknown building')}."
+                connections = s.get('connected_to', [])
+                if connections:
+                    conn_show = connections[:6]
+                    conn_str = ", ".join([f"{c.get('name', '?')} (via {c.get('connection_type', '?')})" for c in conn_show])
+                    more = "" if len(connections) <= len(conn_show) else f" (+{len(connections)-len(conn_show)} more)"
+                    graph_context = f" It directly connects to: {conn_str}{more}."
+                else:
+                    graph_context = " It has no mapped connections."
+                context_lines.append(f"- {s.get('name','?')} ({s.get('type','space')}) is {location}{graph_context}")
+            context_text = "\n".join(context_lines)
 
         prompt_path = Path(__file__).resolve().parents[1] / "core" / "prompt" / "prompt.txt"
         system_prompt = prompt_path.read_text(encoding="utf-8")
