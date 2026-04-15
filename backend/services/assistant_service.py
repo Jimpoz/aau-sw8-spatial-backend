@@ -134,14 +134,20 @@ def clean_response(text: str) -> str:
     ]
     for p in patterns:
         text = re.sub(p, "", text, flags=re.DOTALL)
-
-    text = re.sub(r"^\d+\.\s.*?\n", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*(?:\d+\.|[-*])\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\n+", " ", text, flags=re.MULTILINE)
 
     text = text.strip()
-    if "." in text:
-        text = text.split(".")[0] + "."
-        
-    return text.replace("\n", " ").strip()
+    if re.search(r"(?i)^(?:so\b|therefore\b|thus\b|based on.*?\b|as a result\b)", text):
+        text = re.sub(r"(?i)^(?:so\b|therefore\b|thus\b|based on.*?\b|as a result\b)[^.!?]*[.!?]?\s*", "", text)
+    if len(text) < 5 or re.fullmatch(r"\d+\.?", text):
+        return text
+    
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    if len(sentences) > 1:
+        text = " ".join(sentences[:2])
+
+    return text.strip()
 
 
 def _generate_sync(messages: List[Dict[str, str]]) -> str:

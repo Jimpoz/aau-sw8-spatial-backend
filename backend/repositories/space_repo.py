@@ -11,7 +11,7 @@ def _to_neo4j(data: dict) -> dict:
     for k, v in data.items():
         if v is None:
             continue
-        if k in ("polygon", "metadata") and not isinstance(v, str):
+        if k in ("polygon", "polygon_global", "metadata") and not isinstance(v, str):
             result[k] = json.dumps(v)
         else:
             result[k] = v
@@ -24,7 +24,7 @@ def _to_neo4j(data: dict) -> dict:
 def _from_neo4j(node: dict) -> dict:
     """Deserialize JSON strings back to Python objects."""
     d = dict(node)
-    for key in ("polygon", "metadata"):
+    for key in ("polygon", "polygon_global", "metadata"):
         if isinstance(d.get(key), str):
             try:
                 d[key] = json.loads(d[key])

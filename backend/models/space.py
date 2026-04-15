@@ -18,7 +18,10 @@ class SpaceCreate(BaseModel):
     area_m2: Optional[float] = None
     centroid_x: Optional[float] = None
     centroid_y: Optional[float] = None
+    centroid_lat: Optional[float] = None  # Global latitude
+    centroid_lng: Optional[float] = None  # Global longitude
     polygon: Optional[list[list[float]]] = None
+    polygon_global: Optional[list[list[float]]] = None  # Global lat/lng polygon
     is_accessible: bool = True
     is_navigable: bool = True
     is_outdoor: bool = False
@@ -34,7 +37,10 @@ class SpaceUpdate(BaseModel):
     space_type: Optional[SpaceType] = None
     centroid_x: Optional[float] = None
     centroid_y: Optional[float] = None
+    centroid_lat: Optional[float] = None
+    centroid_lng: Optional[float] = None
     polygon: Optional[list[list[float]]] = None
+    polygon_global: Optional[list[list[float]]] = None
     is_accessible: Optional[bool] = None
     is_navigable: Optional[bool] = None
     is_outdoor: Optional[bool] = None
@@ -57,7 +63,10 @@ class Space(BaseModel):
     area_m2: Optional[float] = None
     centroid_x: Optional[float] = None
     centroid_y: Optional[float] = None
+    centroid_lat: Optional[float] = None
+    centroid_lng: Optional[float] = None
     polygon: Optional[list[list[float]]] = None
+    polygon_global: Optional[list[list[float]]] = None
     is_accessible: bool = True
     is_navigable: bool = True
     is_outdoor: bool = False

@@ -1,5 +1,5 @@
-from typing import Optional
-from pydantic import BaseModel
+from typing import Optional, Union
+from pydantic import BaseModel, Field, validator
 from models.enums import ConnectionType, DoorType, SpaceType
 
 
@@ -7,7 +7,7 @@ class SpaceImport(BaseModel):
     id: str
     display_name: str
     short_name: Optional[str] = None
-    space_type: SpaceType
+    space_type: Union[SpaceType, str]  # Allow string that will be converted
     centroid_x: Optional[float] = None
     centroid_y: Optional[float] = None
     polygon: Optional[list[list[float]]] = None
@@ -22,6 +22,23 @@ class SpaceImport(BaseModel):
     metadata: Optional[dict] = None
     subspaces: list["SpaceImport"] = []
 
+    @validator('space_type', pre=True)
+    def validate_space_type(cls, v):
+        if isinstance(v, str):
+            return SpaceType(v) 
+        return v
+
+    @validator('polygon', pre=True)
+    def validate_polygon(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, list) and len(v) > 0:
+            try:
+                return [[float(coord[0]), float(coord[1])] for coord in v]
+            except (IndexError, TypeError, ValueError):
+                raise ValueError("Polygon must be a list of [x, y] coordinate pairs")
+        return v
+
 
 SpaceImport.model_rebuild()
 
@@ -32,10 +49,11 @@ class FloorImport(BaseModel):
     display_name: str
     elevation_m: Optional[float] = None
     floor_plan_url: Optional[str] = None
-    floor_plan_scale: Optional[float] = None
-    floor_plan_origin_x: Optional[float] = None
-    floor_plan_origin_y: Optional[float] = None
+    floor_plan_scale: Optional[float] = Field(default=1.0)
+    floor_plan_origin_x: Optional[float] = Field(default=0.0)
+    floor_plan_origin_y: Optional[float] = Field(default=0.0)
     spaces: list[SpaceImport] = []
+    floor_plan_bounds: Optional[list[list[float]]] = None 
 
 
 class BuildingImport(BaseModel):
@@ -48,17 +66,32 @@ class BuildingImport(BaseModel):
     origin_bearing: float = 0.0
     floor_count: Optional[int] = None
     floors: list[FloorImport] = []
+    building_bounds: Optional[list[list[float]]] = None
 
 
 class ConnectionImport(BaseModel):
     from_space_id: str
     to_space_id: str
-    connection_type: ConnectionType
+    connection_type: Union[ConnectionType, str]
     is_accessible: bool = True
-    door_type: DoorType = DoorType.NONE
+    door_type: Union[DoorType, str, None] = None
     requires_access_level: Optional[str] = None
     transition_time_s: Optional[float] = None
     weight_override: Optional[float] = None
+
+    @validator('connection_type', pre=True)
+    def validate_connection_type(cls, v):
+        if isinstance(v, str):
+            return ConnectionType(v)
+        return v
+
+    @validator('door_type', pre=True)
+    def validate_door_type(cls, v):
+        if v is None or isinstance(v, DoorType):
+            return v
+        if isinstance(v, str):
+            return DoorType(v)
+        return v
 
 
 class CampusImport(BaseModel):

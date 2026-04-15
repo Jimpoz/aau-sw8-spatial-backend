@@ -51,6 +51,32 @@ class SpaceType(str, Enum):
     INACCESSIBLE = "INACCESSIBLE"
     UNKNOWN = "UNKNOWN"
 
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, str):
+            return super()._missing_(value)
+
+        candidate = value.strip().replace("-", "_").replace(" ", "_").upper()
+        synonyms = {
+            "HALLWAY": "CORRIDOR",
+            "CLASSROOM": "ROOM_CLASSROOM",
+            "LECTURE_HALL": "ROOM_LECTURE_HALL",
+            "OFFICE": "ROOM_OFFICE",
+            "LAB": "ROOM_LAB",
+            "MEETING": "ROOM_MEETING",
+            "STORAGE": "ROOM_STORAGE",
+            "UTILITY": "ROOM_UTILITY",
+            "ACCESSIBLE_RESTROOM": "RESTROOM_ACCESSIBLE",
+            "EMERGENCY_EXIT": "EXIT_EMERGENCY",
+            "EXIT": "EXIT_EMERGENCY",
+        }
+
+        if candidate in cls.__members__:
+            return cls[ candidate ]
+        if candidate in synonyms:
+            return cls[synonyms[candidate]]
+        return super()._missing_(value)
+
 
 class ConnectionType(str, Enum):
     WALKWAY = "WALKWAY"
@@ -67,6 +93,26 @@ class ConnectionType(str, Enum):
     RAMP_UP = "RAMP_UP"
     RAMP_DOWN = "RAMP_DOWN"
 
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, str):
+            return super()._missing_(value)
+
+        candidate = value.strip().replace("-", "_").replace(" ", "_").upper()
+        synonyms = {
+            "DOOR": "DOORWAY",
+            "OPEN_PASSAGE": "WALKWAY",
+            "OPEN": "WALKWAY",
+            "STAIRS_UP": "STAIRCASE_UP",
+            "STAIRS_DOWN": "STAIRCASE_DOWN",
+        }
+
+        if candidate in cls.__members__:
+            return cls[candidate]
+        if candidate in synonyms:
+            return cls[synonyms[candidate]]
+        return super()._missing_(value)
+
 
 class DoorType(str, Enum):
     NONE = "NONE"
@@ -74,3 +120,26 @@ class DoorType(str, Enum):
     AUTOMATIC = "AUTOMATIC"
     LOCKED = "LOCKED"
     EMERGENCY_ONLY = "EMERGENCY_ONLY"
+
+    @classmethod
+    def _missing_(cls, value):
+        if value is None:
+            return cls.NONE
+        if not isinstance(value, str):
+            return super()._missing_(value)
+
+        candidate = value.strip().replace("-", "_").replace(" ", "_").upper()
+        synonyms = {
+            "SINGLE_SWING": "STANDARD",
+            "STANDARD": "STANDARD",
+            "AUTOMATIC": "AUTOMATIC",
+            "LOCKED": "LOCKED",
+            "EMERGENCY_ONLY": "EMERGENCY_ONLY",
+            "EMERGENCYONLY": "EMERGENCY_ONLY",
+        }
+
+        if candidate in cls.__members__:
+            return cls[candidate]
+        if candidate in synonyms:
+            return cls[synonyms[candidate]]
+        return super()._missing_(value)

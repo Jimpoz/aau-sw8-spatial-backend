@@ -11,7 +11,10 @@ from services.geometry_service import (
     area_from_polygon,
     distance_m,
     compute_weight,
+    local_to_global_coordinates,
+    polygon_local_to_global,
 )
+from services.postgis_service import PostGISService
 from sentence_transformers import SentenceTransformer
 
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
@@ -21,6 +24,7 @@ class ImportService:
         self.campus_repo = CampusRepository(db)
         self.space_repo = SpaceRepository(db)
         self.conn_repo = ConnectionRepository(db)
+        self.postgis = PostGISService()
         self._centroids: dict[str, tuple[float, float]] = {}
 
     def import_map(self, schema: MapImportSchema) -> dict:
@@ -60,6 +64,22 @@ class ImportService:
                         floor_plan_origin_y=floor.floor_plan_origin_y,
                     )
                 )
+
+                # Sync floor plan to PostGIS
+                self.postgis.sync_floor_plan({
+                    "id": f"{building.id}_{floor.id}",
+                    "campus_id": campus.id,
+                    "building_id": building.id,
+                    "floor_id": floor.id,
+                    "floor_index": floor.floor_index,
+                    "display_name": floor.display_name,
+                    "floor_plan_url": floor.floor_plan_url,
+                    "floor_plan_scale": floor.floor_plan_scale,
+                    "floor_plan_origin_x": floor.floor_plan_origin_x,
+                    "floor_plan_origin_y": floor.floor_plan_origin_y,
+                    "floor_plan_bounds": floor.floor_plan_bounds,
+                })
+
                 for space in floor.spaces:
                     self._import_space(
                         space,
@@ -113,6 +133,27 @@ class ImportService:
         if cx is not None and cy is not None:
             self._centroids[space.id] = (cx, cy)
             
+        global_lat, global_lng = None, None
+        global_polygon = None
+        
+        if building_id and cx is not None and cy is not None:
+            building = self.campus_repo.get_building(building_id)
+            if building.get("origin_lat") is not None and building.get("origin_lng") is not None:
+                global_lat, global_lng = local_to_global_coordinates(
+                    cx, cy, 
+                    building["origin_lat"], 
+                    building["origin_lng"], 
+                    building.get("origin_bearing") or 0.0
+                )
+                
+                if space.polygon:
+                    global_polygon = polygon_local_to_global(
+                        space.polygon,
+                        building["origin_lat"],
+                        building["origin_lng"],
+                        building.get("origin_bearing") or 0.0
+                    )
+            
         text_to_embed = f"{space.display_name}. Type: {space.space_type}. Tags: {' '.join(space.tags)}"
         
         vector = embedder.encode(text_to_embed).tolist()
@@ -133,7 +174,10 @@ class ImportService:
                 area_m2=area,
                 centroid_x=cx,
                 centroid_y=cy,
+                centroid_lat=global_lat,
+                centroid_lng=global_lng,
                 polygon=space.polygon,
+                polygon_global=global_polygon,
                 is_accessible=space.is_accessible,
                 is_navigable=space.is_navigable,
                 is_outdoor=space.is_outdoor,
@@ -143,6 +187,31 @@ class ImportService:
                 embedding=vector,
             )
         )
+
+        # Sync to PostGIS with global coordinates
+        self.postgis.sync_space({
+            "id": space.id,
+            "display_name": space.display_name,
+            "space_type": space.space_type.value if hasattr(space.space_type, 'value') else str(space.space_type),
+            "floor_index": floor_index,
+            "centroid_x": cx,
+            "centroid_y": cy,
+            "centroid_lat": global_lat,
+            "centroid_lng": global_lng,
+            "width_m": space.width_m,
+            "length_m": space.length_m,
+            "area_m2": area,
+            "polygon": space.polygon,
+            "polygon_global": global_polygon,
+            "is_accessible": space.is_accessible,
+            "is_navigable": space.is_navigable,
+            "is_outdoor": space.is_outdoor,
+            "capacity": space.capacity,
+            "tags": space.tags,
+            "metadata": space.metadata,
+            "campus_id": campus_id,
+            "building_id": building_id,
+        })
 
         for subspace in space.subspaces:
             self._import_space(
