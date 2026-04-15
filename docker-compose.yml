@@ -15,6 +15,22 @@ services:
       - assistant
       - image_pipeline
 
+  middleware:
+    build:
+      context: ./middleware
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - ASSISTANT_URL=http://assistant:8001
+      - IMAGE_PIPELINE_URL=http://image_pipeline:8002
+      - MIDDLEWARE_DEBUG_UPSTREAMS=${MIDDLEWARE_DEBUG_UPSTREAMS:-false}
+    depends_on:
+      - backend
+      - assistant
+      - image_pipeline
+
   backend:
     build:
       context: ./backend
@@ -61,6 +77,8 @@ services:
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
     volumes:
+      - ./image_pipeline:/app
+      - ./shared:/app/shared
       - ./image_pipeline:/app
       - ./shared:/app/shared
 

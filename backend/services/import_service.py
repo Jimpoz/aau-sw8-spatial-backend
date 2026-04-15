@@ -1,5 +1,5 @@
 from db import Database
-from models.map_import import MapImportSchema, SpaceImport, ConnectionImport
+from models.map_import import MapImportSchema, SpaceImport, ConnectionNodeImport
 from models.campus import CampusCreate, BuildingCreate, FloorCreate
 from models.space import SpaceCreate
 from repositories.campus_repo import CampusRepository
@@ -101,6 +101,7 @@ class ImportService:
             )
 
         # 4. Connection nodes
+        # 4. Connection nodes
         counts = {"spaces": len(self._centroids), "connections": 0}
         for conn in campus.connections:
             self._import_connection_node(conn)
@@ -191,6 +192,7 @@ class ImportService:
                 tags=space.tags,
                 metadata=space.metadata,
                 embedding=vector,
+                traversal_cost=traversal_cost,
                 traversal_cost=traversal_cost,
             )
         )

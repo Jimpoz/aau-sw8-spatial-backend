@@ -102,7 +102,7 @@ class CampusImport(BaseModel):
     description: Optional[str] = None
     buildings: list[BuildingImport] = []
     outdoor_spaces: list[SpaceImport] = []
-    connections: list[ConnectionImport] = []
+    connections: list[ConnectionNodeImport] = []
 
 
 class MapImportSchema(BaseModel):
