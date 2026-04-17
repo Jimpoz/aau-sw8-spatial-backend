@@ -8,6 +8,7 @@ from pydantic import BaseModel
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 ASSISTANT_URL = os.getenv("ASSISTANT_URL", "http://assistant:8001")
 IMAGE_PIPELINE_URL = os.getenv("IMAGE_PIPELINE_URL", "http://image_pipeline:8002")
+API_SECRET = os.getenv("API_SECRET", "")
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -42,6 +43,9 @@ OPENAPI_SOURCES = (
     },
 )
 
+_UNPROTECTED_PATHS = {"/health"}
+
+
 app = FastAPI(
     title="Indoor Navigation Gateway",
     version="1.0.0",
@@ -58,6 +62,19 @@ app = FastAPI(
         else []
     ),
 )
+
+
+@app.middleware("http")
+async def verify_api_key(request: Request, call_next):
+    if request.url.path in _UNPROTECTED_PATHS:
+        return await call_next(request)
+    if not API_SECRET or request.headers.get("X-Api-Key") != API_SECRET:
+        return Response(
+            content=b'{"detail":"Unauthorized"}',
+            status_code=401,
+            headers={"Content-Type": "application/json"},
+        )
+    return await call_next(request)
 
 
 async def _probe_url(client: httpx.AsyncClient, url: str) -> dict[str, Any]:

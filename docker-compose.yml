@@ -10,6 +10,7 @@ services:
       - ASSISTANT_URL=http://assistant:8001
       - IMAGE_PIPELINE_URL=http://image_pipeline:8002
       - MIDDLEWARE_DEBUG_UPSTREAMS=${MIDDLEWARE_DEBUG_UPSTREAMS:-false}
+      - API_SECRET=${API_SECRET}
     depends_on:
       - backend
       - assistant
