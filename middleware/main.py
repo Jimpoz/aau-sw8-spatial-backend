@@ -96,12 +96,19 @@ async def _proxy(request: Request, target_base: str, upstream_name: str) -> Resp
     headers = dict(request.headers)
     headers.pop("host", None)
 
-    async with httpx.AsyncClient(timeout=900.0) as client:
-        resp = await client.request(
-            method=request.method,
-            url=url,
-            headers=headers,
-            content=body,
+    try:
+        async with httpx.AsyncClient(timeout=900.0) as client:
+            resp = await client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                content=body,
+            )
+    except httpx.HTTPError:
+        return Response(
+            content=f'{{"detail":"{upstream_name} unavailable"}}'.encode(),
+            status_code=502,
+            headers={"Content-Type": "application/json"},
         )
 
     response_headers = dict(resp.headers)

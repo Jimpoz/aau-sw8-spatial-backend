@@ -71,5 +71,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:80"
+    environment:
+      - API_SECRET=${API_SECRET}
     depends_on:
       - middleware
