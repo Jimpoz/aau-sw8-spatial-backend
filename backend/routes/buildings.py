@@ -3,13 +3,27 @@ from db import Database, get_db
 from core.exceptions import BuildingNotFound
 from models.campus import Building, BuildingCreate
 from repositories.campus_repo import CampusRepository
+from services.postgis_service import PostGISService
 
 router = APIRouter(prefix="/buildings", tags=["buildings"])
 
 
 @router.post("", response_model=Building, status_code=201)
 def create_building(data: BuildingCreate, db: Database = Depends(get_db)):
-    return CampusRepository(db).create_building(data)
+    building = CampusRepository(db).create_building(data)
+    PostGISService().sync_building({
+        "id": building["id"],
+        "campus_id": building.get("campus_id"),
+        "organization_id": building.get("organization_id"),
+        "name": building.get("name"),
+        "short_name": building.get("short_name"),
+        "address": building.get("address"),
+        "origin_lat": building.get("origin_lat"),
+        "origin_lng": building.get("origin_lng"),
+        "origin_bearing": building.get("origin_bearing"),
+        "floor_count": building.get("floor_count"),
+    })
+    return building
 
 
 @router.get("/{building_id}", response_model=Building)

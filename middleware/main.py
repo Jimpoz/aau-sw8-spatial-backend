@@ -1,13 +1,16 @@
+import asyncio
 import os
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request, Response
+import websockets
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000")
 ASSISTANT_URL = os.getenv("ASSISTANT_URL", "http://assistant:8001")
 IMAGE_PIPELINE_URL = os.getenv("IMAGE_PIPELINE_URL", "http://image_pipeline:8002")
+ML_VISION_URL = os.getenv("ML_VISION_URL", "http://ml_vision:8000")
 API_SECRET = os.getenv("API_SECRET", "")
 
 
@@ -39,6 +42,12 @@ OPENAPI_SOURCES = (
         "name": "image_pipeline",
         "base_url": IMAGE_PIPELINE_URL,
         "public_prefixes": ("/api/v1/room-summary",),
+        "exclude_prefixes": (),
+    },
+    {
+        "name": "ml_vision",
+        "base_url": ML_VISION_URL,
+        "public_prefixes": ("/api/v1/ml-vision",),
         "exclude_prefixes": (),
     },
 )
@@ -181,6 +190,7 @@ async def health():
     backend_ok = False
     assistant_ok = False
     image_pipeline_ok = False
+    ml_vision_ok = False
 
     async with httpx.AsyncClient(timeout=5.0) as client:
         try:
@@ -198,12 +208,18 @@ async def health():
             image_pipeline_ok = r.status_code == 200
         except Exception:
             pass
+        try:
+            r = await client.get(f"{ML_VISION_URL}/health")
+            ml_vision_ok = r.status_code == 200
+        except Exception:
+            pass
 
     return {
-        "status": "ok" if backend_ok and assistant_ok and image_pipeline_ok else "degraded",
+        "status": "ok" if backend_ok and assistant_ok and image_pipeline_ok and ml_vision_ok else "degraded",
         "backend": "ok" if backend_ok else "unavailable",
         "assistant": "ok" if assistant_ok else "unavailable",
         "image_pipeline": "ok" if image_pipeline_ok else "unavailable",
+        "ml_vision": "ok" if ml_vision_ok else "unavailable",
     }
 
 
@@ -264,6 +280,125 @@ async def proxy_assistant(request: Request, path: str):
 @app.api_route("/api/v1/room-summary/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)
 async def proxy_image_pipeline(request: Request, path: str = ""):
     return await _proxy(request, IMAGE_PIPELINE_URL, "image_pipeline")
+
+
+@app.api_route(
+    "/api/v1/ml-vision/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
+    include_in_schema=False,
+)
+async def proxy_ml_vision(request: Request, path: str):
+    upstream_path = f"/{path}" if path else "/"
+    query = str(request.url.query)
+    url = f"{ML_VISION_URL}{upstream_path}"
+    if query:
+        url = f"{url}?{query}"
+
+    body = await request.body()
+    headers = dict(request.headers)
+    headers.pop("host", None)
+
+    try:
+        async with httpx.AsyncClient(timeout=900.0) as client:
+            resp = await client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                content=body,
+            )
+    except httpx.HTTPError:
+        return Response(
+            content=b'{"detail":"ml_vision unavailable"}',
+            status_code=502,
+            headers={"Content-Type": "application/json"},
+        )
+
+    response_headers = dict(resp.headers)
+    response_headers["X-Gateway-Upstream"] = "ml_vision"
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=response_headers,
+    )
+
+
+def _http_to_ws(url: str) -> str:
+    if url.startswith("https://"):
+        return "wss://" + url[len("https://"):]
+    if url.startswith("http://"):
+        return "ws://" + url[len("http://"):]
+    return url
+
+
+@app.websocket("/api/v1/ml-vision/ws/stream/{facility_id}")
+async def proxy_ml_vision_stream(websocket: WebSocket, facility_id: str):
+    """Bidirectional bridge between an iOS/Android client WebSocket and the
+    ml_vision service. Auth is enforced here (the HTTP auth middleware does
+    not run on WebSocket handshakes)."""
+    if not API_SECRET or websocket.headers.get("x-api-key") != API_SECRET:
+        await websocket.close(code=4401)
+        return
+
+    await websocket.accept()
+
+    upstream_ws_base = _http_to_ws(ML_VISION_URL)
+    upstream_url = f"{upstream_ws_base}/ws/stream/{facility_id}"
+
+    try:
+        async with websockets.connect(
+            upstream_url,
+            max_size=None,
+            open_timeout=10,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as upstream:
+
+            async def client_to_upstream() -> None:
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        if msg.get("type") == "websocket.disconnect":
+                            return
+                        data = msg.get("bytes")
+                        text = msg.get("text")
+                        if data is not None:
+                            await upstream.send(data)
+                        elif text is not None:
+                            await upstream.send(text)
+                except WebSocketDisconnect:
+                    return
+
+            async def upstream_to_client() -> None:
+                try:
+                    async for msg in upstream:
+                        if isinstance(msg, (bytes, bytearray)):
+                            await websocket.send_bytes(bytes(msg))
+                        else:
+                            await websocket.send_text(msg)
+                except websockets.ConnectionClosed:
+                    return
+
+            tasks = [
+                asyncio.create_task(client_to_upstream()),
+                asyncio.create_task(upstream_to_client()),
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+    except (OSError, websockets.InvalidURI, websockets.InvalidHandshake):
+        # upstream unreachable or rejected handshake
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+        return
+    except Exception as exc:
+        print(f"[ml_vision stream bridge] error: {exc}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"], include_in_schema=False)

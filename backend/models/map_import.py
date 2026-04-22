@@ -1,6 +1,14 @@
 from typing import Optional, Union
 from pydantic import BaseModel, Field, validator
-from shared.models.enums import ConnectionType, DoorType, SpaceType
+from shared.models.enums import ConnectionType, DoorType, SpaceType, EntityType
+
+
+class OrganizationImport(BaseModel):
+    """Organization/entity context for the import."""
+    id: str
+    name: str
+    entity_type: EntityType = EntityType.OTHER
+    description: Optional[str] = None
 
 
 class SpaceImport(BaseModel):
@@ -61,6 +69,7 @@ class BuildingImport(BaseModel):
     name: str
     short_name: Optional[str] = None
     address: Optional[str] = None
+    organization_id: Optional[str] = None
     origin_lat: Optional[float] = None
     origin_lng: Optional[float] = None
     origin_bearing: float = 0.0
@@ -100,6 +109,7 @@ class CampusImport(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    organization_id: Optional[str] = None
     buildings: list[BuildingImport] = []
     outdoor_spaces: list[SpaceImport] = []
     connections: list[ConnectionNodeImport] = []
@@ -107,4 +117,5 @@ class CampusImport(BaseModel):
 
 class MapImportSchema(BaseModel):
     schema_version: str = "1.0"
+    organization: Optional[OrganizationImport] = None
     campus: CampusImport

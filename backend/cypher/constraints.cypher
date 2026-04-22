@@ -1,3 +1,4 @@
+CREATE CONSTRAINT organization_id_unique IF NOT EXISTS FOR (o:Organization) REQUIRE o.id IS UNIQUE;
 CREATE CONSTRAINT campus_id_unique IF NOT EXISTS FOR (c:Campus) REQUIRE c.id IS UNIQUE;
 CREATE CONSTRAINT building_id_unique IF NOT EXISTS FOR (b:Building) REQUIRE b.id IS UNIQUE;
 CREATE CONSTRAINT floor_id_unique IF NOT EXISTS FOR (f:Floor) REQUIRE f.id IS UNIQUE;

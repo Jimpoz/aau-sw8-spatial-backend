@@ -187,6 +187,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 <div id="sidebar">
   <div class="panel">
     <h3>Map</h3>
+    <label for="organization-select">Organization</label>
+    <select id="organization-select"><option value="">All organizations</option></select>
     <label for="campus-select">Campus</label>
     <select id="campus-select"><option value="">Select campus...</option></select>
     <label for="building-select">Building</label>
@@ -275,12 +277,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <option value="SHOP">Shop</option>
         </optgroup>
       </select>
-      <label>Size (meters)</label>
-      <div class="size-row">
-        <input type="number" id="new-space-w" value="4" min="0.5" step="0.5" placeholder="Width">
-        <input type="number" id="new-space-h" value="3" min="0.5" step="0.5" placeholder="Height">
+      <label for="new-space-shape">Shape</label>
+      <select id="new-space-shape">
+        <option value="rectangle">Rectangle</option>
+        <option value="circle">Circle</option>
+        <option value="polygon">Polygon</option>
+      </select>
+      <div id="shape-fields-rectangle" class="shape-fields">
+        <label>Size (meters)</label>
+        <div class="size-row">
+          <input type="number" id="new-space-w" value="4" min="0.5" step="0.5" placeholder="Width">
+          <input type="number" id="new-space-h" value="3" min="0.5" step="0.5" placeholder="Height">
+        </div>
       </div>
-      <p class="tool-hint">Click on the map to place the space at that location.</p>
+      <div id="shape-fields-circle" class="shape-fields" style="display:none">
+        <label>Radius (meters)</label>
+        <input type="number" id="new-space-radius" value="2" min="0.5" step="0.5">
+      </div>
+      <div id="shape-fields-polygon" class="shape-fields" style="display:none">
+        <button type="button" id="finish-polygon-btn" class="btn-primary" style="margin-top:6px">Finish polygon</button>
+      </div>
+      <p class="tool-hint" id="add-space-hint">Click on the map to place the space at that location.</p>
     </div>
     <div id="connect-form" style="display:none">
       <label for="new-conn-type">Connection Type</label>
@@ -314,8 +331,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 <div id="modal-overlay" class="modal-overlay" style="display:none">
   <div class="modal">
     <h2>Create New Map</h2>
+
+    <label for="new-org-select">Organization</label>
+    <select id="new-org-select">
+      <option value="__new__">+ Create new organization…</option>
+    </select>
+
+    <div id="new-org-fields">
+      <label for="new-org-name">Organization Name</label>
+      <input type="text" id="new-org-name" placeholder="e.g. Aalborg University">
+      <label for="new-org-entity-type">Entity Type</label>
+      <select id="new-org-entity-type">
+        <option value="UNIVERSITY">University</option>
+        <option value="CORPORATION">Corporation</option>
+        <option value="PUBLIC_HEALTH">Public Health</option>
+        <option value="HOSPITAL">Hospital</option>
+        <option value="GOVERNMENT">Government</option>
+        <option value="OTHER">Other</option>
+      </select>
+    </div>
+
     <label for="new-campus-name">Campus Name</label>
-    <input type="text" id="new-campus-name" placeholder="e.g. Aalborg University">
+    <input type="text" id="new-campus-name" placeholder="e.g. Copenhagen Campus">
     <label for="new-building-name">Building Name</label>
     <input type="text" id="new-building-name" placeholder="e.g. Main Building">
     <label for="new-floor-name">First Floor Name</label>
@@ -425,11 +462,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 const API = '/api/v1';
 
 const state = {
+  organizations: [],
   campuses: [],
   buildings: [],
   floors: [],
   spaces: [],
   connections: [],
+  selectedOrganizationId: null,
   selectedCampusId: null,
   selectedBuildingId: null,
   selectedFloorId: null,
@@ -446,6 +485,9 @@ const state = {
   // Duplicate placement mode
   pendingDuplicate: null,
   pendingDupOrigPoly: null,
+  // Polygon-drawing mode (within addSpace when shape=polygon)
+  pendingPolygon: [],       // accumulated vertices in world coords [[x,y], ...]
+  pendingCursorWorld: null, // live cursor world coords for preview segment
   // Context menu
   contextMenu: null,
   // Snap indicators
@@ -838,6 +880,67 @@ function render() {
     }
     ctx.restore();
   }
+
+  // In-progress polygon (addSpace + polygon shape): placed vertices + edges,
+  // plus a dashed rubber-band segment from the last vertex to the cursor.
+  if (state.mode === 'addSpace' && state.pendingPolygon && state.pendingPolygon.length > 0) {
+    const color = COLORS[$('new-space-type').value] || '#4a90d9';
+    ctx.save();
+
+    // Placed edges (solid)
+    if (state.pendingPolygon.length >= 2) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const [sx, sy] = worldToCanvas(state.pendingPolygon[0][0], state.pendingPolygon[0][1]);
+      ctx.moveTo(sx, sy);
+      for (let i = 1; i < state.pendingPolygon.length; i++) {
+        const [px, py] = worldToCanvas(state.pendingPolygon[i][0], state.pendingPolygon[i][1]);
+        ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+
+    // Rubber-band preview to cursor (dashed), only when cursor known
+    if (state.pendingCursorWorld) {
+      const last = state.pendingPolygon[state.pendingPolygon.length - 1];
+      const [lx, ly] = worldToCanvas(last[0], last[1]);
+      const [cx, cy] = worldToCanvas(state.pendingCursorWorld[0], state.pendingCursorWorld[1]);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(cx, cy);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Closing hint: dashed line back to first vertex if >= 3 points
+      if (state.pendingPolygon.length >= 3) {
+        const [fx, fy] = worldToCanvas(state.pendingPolygon[0][0], state.pendingPolygon[0][1]);
+        ctx.strokeStyle = 'rgba(74,144,217,0.5)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(fx, fy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // Vertex handles
+    ctx.fillStyle = '#fff';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < state.pendingPolygon.length; i++) {
+      const [px, py] = worldToCanvas(state.pendingPolygon[i][0], state.pendingPolygon[i][1]);
+      ctx.beginPath();
+      ctx.arc(px, py, i === 0 ? 5 : 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
 }
 
 function drawPolygon(polygon, fill, stroke, lineWidth) {
@@ -912,6 +1015,18 @@ canvas.addEventListener('mousedown', e => {
   canvas.classList.add('dragging');
 });
 
+canvas.addEventListener('dblclick', e => {
+  if (state.mode !== 'addSpace' || currentShape() !== 'polygon') return;
+  if (state.pendingPolygon.length < 3) return;
+  e.preventDefault();
+  const last = state.pendingPolygon[state.pendingPolygon.length - 1];
+  const prev = state.pendingPolygon[state.pendingPolygon.length - 2];
+  if (last && prev && last[0] === prev[0] && last[1] === prev[1]) {
+    state.pendingPolygon.pop();
+  }
+  finishPendingPolygon();
+});
+
 canvas.addEventListener('mousemove', e => {
   if (state.isDragging) {
     state.pan.x = state.panStart.x + (e.clientX - state.dragStart.x);
@@ -972,21 +1087,42 @@ canvas.addEventListener('mousemove', e => {
   }
   if (state.mode === 'addSpace' && state.selectedFloorId) {
     const [rawWx, rawWy] = canvasToWorld(mx, my);
-    const w = parseFloat($('new-space-w').value) || 4;
-    const h = parseFloat($('new-space-h').value) || 3;
-    const halfW = w / 2, halfH = h / 2;
-    const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
+    const shape = currentShape();
+
+    let pendX = rawWx, pendY = rawWy;
+    if (shape === 'polygon' && state.pendingPolygon.length > 0) {
+      const last = state.pendingPolygon[state.pendingPolygon.length - 1];
+      [pendX, pendY] = snapToAxis(last[0], last[1], rawWx, rawWy);
+    }
+    state.pendingCursorWorld = [pendX, pendY];
+    let ghostPoly = null;
+    let tipX = pendX, tipY = pendY;
+
+    if (shape === 'rectangle') {
+      const w = parseFloat($('new-space-w').value) || 4;
+      const h = parseFloat($('new-space-h').value) || 3;
+      const halfW = w / 2, halfH = h / 2;
+      const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
+      tipX = wx; tipY = wy;
+      ghostPoly = [
+        [wx - halfW, wy - halfH], [wx + halfW, wy - halfH],
+        [wx + halfW, wy + halfH], [wx - halfW, wy + halfH], [wx - halfW, wy - halfH],
+      ];
+    } else if (shape === 'circle') {
+      const r = parseFloat($('new-space-radius').value) || 2;
+      ghostPoly = approximateCircle(rawWx, rawWy, r, 32);
+    }
+
     tooltip.style.display = 'block';
     tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
     tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
-    tooltip.textContent = `${wx.toFixed(1)}, ${wy.toFixed(1)} m`;
+    tooltip.textContent = `${tipX.toFixed(1)}, ${tipY.toFixed(1)} m`;
     render();
-    const ghostPoly = [
-      [wx - halfW, wy - halfH], [wx + halfW, wy - halfH],
-      [wx + halfW, wy + halfH], [wx - halfW, wy + halfH], [wx - halfW, wy - halfH],
-    ];
-    const color = COLORS[$('new-space-type').value] || '#F0F0F0';
-    drawPolygon(ghostPoly, blendColor(color, '#ffffff', 0.4), '#4a90d9', 2);
+
+    if (ghostPoly) {
+      const color = COLORS[$('new-space-type').value] || '#F0F0F0';
+      drawPolygon(ghostPoly, blendColor(color, '#ffffff', 0.4), '#4a90d9', 2);
+    }
   } else if (space) {
     tooltip.style.display = 'block';
     tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
@@ -1071,6 +1207,32 @@ canvas.addEventListener('wheel', e => {
 /* ═══════════════════════════════════════════════
    Sidebar: Selectors
    ═══════════════════════════════════════════════ */
+$('organization-select').addEventListener('change', async function() {
+  const id = this.value;
+  state.selectedOrganizationId = id || null;
+  state.selectedCampusId = null;
+  state.buildings = [];
+  state.floors = [];
+  state.spaces = [];
+  state.connections = [];
+
+  const bSel = $('building-select');
+  bSel.innerHTML = '<option value="">Select building...</option>';
+  bSel.disabled = true;
+  const fSel = $('floor-select');
+  fSel.innerHTML = '<option value="">Select floor...</option>';
+  fSel.disabled = true;
+  $('add-building-btn').disabled = true;
+  $('add-floor-btn').disabled = true;
+  $('search-input').disabled = true;
+  $('export-btn').disabled = true;
+  $('chat-input').disabled = true;
+  $('chat-btn').disabled = true;
+
+  updateMapVisibility();
+  await loadCampuses();
+});
+
 $('campus-select').addEventListener('change', async function() {
   const id = this.value;
   state.selectedCampusId = id || null;
@@ -1158,10 +1320,16 @@ $('floor-select').addEventListener('change', async function() {
   if (!id) return;
   try {
     const display = await api(`/floors/${id}/display`);
-    state.spaces = flattenSpaces(display.spaces || []);
-    const floor = display.floor || {};
-    state.currentFloorIndex = floor.floor_index ?? null;
-    state.currentBuildingId = floor.building_id ?? state.selectedBuildingId;
+    const spacesRaw = Array.isArray(display) ? display : (display.spaces || []);
+    state.spaces = flattenSpaces(spacesRaw);
+    try {
+      const floor = await api(`/floors/${id}`);
+      state.currentFloorIndex = floor?.floor_index ?? null;
+      state.currentBuildingId = floor?.building_id ?? state.selectedBuildingId;
+    } catch (e) {
+      state.currentFloorIndex = null;
+      state.currentBuildingId = state.selectedBuildingId;
+    }
     fitToCanvas();
     updateMapVisibility();
     // Load connections for this floor
@@ -1295,6 +1463,12 @@ $('import-btn').addEventListener('click', async () => {
       body: text,
     });
     notify(`Imported: ${result.spaces_imported} spaces, ${result.connections_imported} connections`);
+    await loadOrganizations();
+    const importedOrgId = result.organization_id || json.organization?.id || json.campus?.organization_id || '';
+    if (importedOrgId) {
+      $('organization-select').value = importedOrgId;
+      state.selectedOrganizationId = importedOrgId;
+    }
     await loadCampuses();
     $('campus-select').value = campusId;
     $('campus-select').dispatchEvent(new Event('change'));
@@ -1332,13 +1506,50 @@ $('export-btn').addEventListener('click', async () => {
    ═══════════════════════════════════════════════ */
 function uuid() { return crypto.randomUUID(); }
 
+function refreshNewMapOrgDropdown() {
+  const sel = $('new-org-select');
+  sel.innerHTML = '';
+  for (const o of state.organizations) {
+    const opt = document.createElement('option');
+    opt.value = o.id;
+    opt.textContent = o.name;
+    sel.appendChild(opt);
+  }
+  const newOpt = document.createElement('option');
+  newOpt.value = '__new__';
+  newOpt.textContent = '+ Create new organization…';
+  sel.appendChild(newOpt);
+
+  if (state.selectedOrganizationId) {
+    sel.value = state.selectedOrganizationId;
+  } else {
+    sel.value = '__new__';
+  }
+  updateNewOrgFieldsVisibility();
+}
+
+function updateNewOrgFieldsVisibility() {
+  const creating = $('new-org-select').value === '__new__';
+  $('new-org-fields').style.display = creating ? 'block' : 'none';
+}
+
+$('new-org-select').addEventListener('change', updateNewOrgFieldsVisibility);
+
 $('new-map-btn').addEventListener('click', () => {
   $('modal-overlay').style.display = 'flex';
+  $('new-org-name').value = '';
+  $('new-org-entity-type').value = 'UNIVERSITY';
   $('new-campus-name').value = '';
   $('new-building-name').value = '';
   $('new-floor-name').value = 'Ground Floor';
   $('new-floor-index').value = '0';
-  setTimeout(() => $('new-campus-name').focus(), 100);
+  refreshNewMapOrgDropdown();
+  setTimeout(() => {
+    const focusTarget = $('new-org-select').value === '__new__'
+      ? $('new-org-name')
+      : $('new-campus-name');
+    focusTarget.focus();
+  }, 100);
 });
 
 $('modal-cancel').addEventListener('click', () => {
@@ -1355,22 +1566,43 @@ $('modal-create').addEventListener('click', async () => {
   const floorName = $('new-floor-name').value.trim();
   const floorIndex = parseInt($('new-floor-index').value) || 0;
 
+  const orgChoice = $('new-org-select').value;
+  const creatingNewOrg = orgChoice === '__new__';
+  const orgName = $('new-org-name').value.trim();
+  const entityType = $('new-org-entity-type').value;
+
+  if (creatingNewOrg && !orgName) {
+    notify('Organization name is required', 'error');
+    return;
+  }
   if (!campusName) { notify('Campus name is required', 'error'); return; }
   if (!buildingName) { notify('Building name is required', 'error'); return; }
   if (!floorName) { notify('Floor name is required', 'error'); return; }
 
+  const organizationId = creatingNewOrg ? uuid() : orgChoice;
   const campusId = uuid();
   const buildingId = uuid();
   const floorId = uuid();
 
+  const organization = creatingNewOrg
+    ? {
+        id: organizationId,
+        name: orgName,
+        entity_type: entityType,
+      }
+    : (state.organizations.find(o => o.id === organizationId) || null);
+
   const importData = {
     schema_version: '1.0',
+    organization: organization,
     campus: {
       id: campusId,
       name: campusName,
+      organization_id: organizationId,
       buildings: [{
         id: buildingId,
         name: buildingName,
+        organization_id: organizationId,
         floors: [{
           id: floorId,
           floor_index: floorIndex,
@@ -1394,6 +1626,9 @@ $('modal-create').addEventListener('click', async () => {
     notify(`Map "${campusName}" created`);
     $('modal-overlay').style.display = 'none';
 
+    await loadOrganizations();
+    $('organization-select').value = organizationId;
+    state.selectedOrganizationId = organizationId;
     await loadCampuses();
     $('campus-select').value = campusId;
     $('campus-select').dispatchEvent(new Event('change'));
@@ -1432,7 +1667,12 @@ $('building-modal-create').addEventListener('click', async () => {
     await api('/buildings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: buildingId, campus_id: state.selectedCampusId, name }),
+      body: JSON.stringify({
+        id: buildingId,
+        campus_id: state.selectedCampusId,
+        organization_id: state.selectedOrganizationId || null,
+        name,
+      }),
     });
     notify(`Building "${name}" created`);
     $('building-modal-overlay').style.display = 'none';
@@ -1505,6 +1745,8 @@ function setMode(mode) {
   state.mode = mode;
   state.connectFrom = null;
 
+  if (mode !== 'addSpace') resetPendingPolygon();
+
   for (const btn of document.querySelectorAll('.tool-bar button')) {
     btn.classList.toggle('active', btn.dataset.mode === mode);
   }
@@ -1531,6 +1773,123 @@ $('tool-add-space').addEventListener('click', () => setMode('addSpace'));
 $('tool-connect').addEventListener('click', () => setMode('connect'));
 
 /* ═══════════════════════════════════════════════
+   Shape Selector (Rectangle / Circle / Polygon)
+   ═══════════════════════════════════════════════ */
+function currentShape() { return $('new-space-shape').value; }
+
+function resetPendingPolygon() {
+  state.pendingPolygon = [];
+  state.pendingCursorWorld = null;
+}
+
+function updateShapeFields() {
+  const shape = currentShape();
+  $('shape-fields-rectangle').style.display = shape === 'rectangle' ? 'block' : 'none';
+  $('shape-fields-circle').style.display    = shape === 'circle'    ? 'block' : 'none';
+  $('shape-fields-polygon').style.display   = shape === 'polygon'   ? 'block' : 'none';
+
+  const hint = $('add-space-hint');
+  if (shape === 'rectangle') {
+    hint.textContent = 'Click on the map to place the space at that location.';
+  } else if (shape === 'circle') {
+    hint.textContent = 'Click on the map to place a circular space centered there.';
+  } else {
+    hint.innerHTML = 'Click to add a vertex. Double-click (or press <strong>Enter</strong> / Finish) to close the polygon. <strong>Esc</strong> cancels.';
+  }
+
+  resetPendingPolygon();
+  render();
+}
+
+$('new-space-shape').addEventListener('change', updateShapeFields);
+
+$('finish-polygon-btn').addEventListener('click', (e) => {
+  e.preventDefault();
+  finishPendingPolygon();
+});
+
+function approximateCircle(cx, cy, radius, segments = 32) {
+  const pts = [];
+  for (let i = 0; i < segments; i++) {
+    const angle = (i / segments) * Math.PI * 2;
+    pts.push([cx + Math.cos(angle) * radius, cy + Math.sin(angle) * radius]);
+  }
+  pts.push([...pts[0]]); // close
+  return pts;
+}
+
+function polygonCentroid(polygon) {
+  let area = 0, cx = 0, cy = 0;
+  const n = polygon.length - (
+    polygon[0][0] === polygon[polygon.length - 1][0] &&
+    polygon[0][1] === polygon[polygon.length - 1][1] ? 1 : 0
+  );
+  for (let i = 0; i < n; i++) {
+    const [x1, y1] = polygon[i];
+    const [x2, y2] = polygon[(i + 1) % n];
+    const cross = x1 * y2 - x2 * y1;
+    area += cross;
+    cx += (x1 + x2) * cross;
+    cy += (y1 + y2) * cross;
+  }
+  area /= 2;
+  if (area === 0) {
+    const mean = polygon.reduce((a, [x, y]) => [a[0] + x, a[1] + y], [0, 0]);
+    return [mean[0] / polygon.length, mean[1] / polygon.length];
+  }
+  return [cx / (6 * area), cy / (6 * area)];
+}
+
+function snapToAxis(prevX, prevY, cursorX, cursorY, thresholdDeg = 10) {
+  const dx = cursorX - prevX;
+  const dy = cursorY - prevY;
+  const len = Math.hypot(dx, dy);
+  if (len < 0.01) return [cursorX, cursorY];
+
+  const thresholdRad = thresholdDeg * Math.PI / 180;
+  const angle = Math.atan2(dy, dx);
+  // 8 snap angles spaced every 45°
+  const snaps = [0, 1, 2, 3, 4, -1, -2, -3].map(k => k * Math.PI / 4);
+
+  let best = null, bestDiff = Infinity;
+  for (const sa of snaps) {
+    let diff = Math.abs(angle - sa);
+    if (diff > Math.PI) diff = 2 * Math.PI - diff;
+    if (diff < bestDiff) { bestDiff = diff; best = sa; }
+  }
+  if (bestDiff < thresholdRad) {
+    if (best === 0 || best === Math.PI || best === -Math.PI) return [cursorX, prevY];
+    if (best === Math.PI / 2 || best === -Math.PI / 2) return [prevX, cursorY];
+    return [prevX + Math.cos(best) * len, prevY + Math.sin(best) * len];
+  }
+  return [cursorX, cursorY];
+}
+
+function closedPolygon(points) {
+  if (points.length === 0) return [];
+  const first = points[0], last = points[points.length - 1];
+  if (first[0] === last[0] && first[1] === last[1]) return points;
+  return [...points, [...first]];
+}
+
+async function finishPendingPolygon() {
+  if (state.pendingPolygon.length < 3) {
+    notify('Polygon needs at least 3 vertices', 'error');
+    return;
+  }
+  const poly = closedPolygon(state.pendingPolygon);
+  const [cx, cy] = polygonCentroid(poly);
+  resetPendingPolygon();
+  await createSpaceFromPolygon(poly, cx, cy);
+}
+
+function cancelPendingPolygon() {
+  if (state.pendingPolygon.length === 0) return;
+  resetPendingPolygon();
+  render();
+}
+
+/* ═══════════════════════════════════════════════
    Add Space on Click
    ═══════════════════════════════════════════════ */
 async function handleAddSpaceClick(canvasX, canvasY) {
@@ -1540,18 +1899,54 @@ async function handleAddSpaceClick(canvasX, canvasY) {
   if (!name) { notify('Enter a space name first', 'error'); $('new-space-name').focus(); return; }
 
   const [rawWx, rawWy] = canvasToWorld(canvasX, canvasY);
-  const w = parseFloat($('new-space-w').value) || 4;
-  const h = parseFloat($('new-space-h').value) || 3;
-  const halfW = w / 2, halfH = h / 2;
-  const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
-  state.snapLines = [];
+  const shape = currentShape();
 
-  // Auto-detect parent: find the most nested space containing the click point
+  if (shape === 'rectangle') {
+    const w = parseFloat($('new-space-w').value) || 4;
+    const h = parseFloat($('new-space-h').value) || 3;
+    const halfW = w / 2, halfH = h / 2;
+    const [wx, wy] = applySnap(rawWx, rawWy, halfW, halfH, null);
+    state.snapLines = [];
+    const polygon = [
+      [wx - halfW, wy - halfH],
+      [wx + halfW, wy - halfH],
+      [wx + halfW, wy + halfH],
+      [wx - halfW, wy + halfH],
+      [wx - halfW, wy - halfH],
+    ];
+    await createSpaceFromPolygon(polygon, wx, wy);
+    return;
+  }
+
+  if (shape === 'circle') {
+    const r = parseFloat($('new-space-radius').value) || 2;
+    const [wx, wy] = [rawWx, rawWy];
+    state.snapLines = [];
+    const polygon = approximateCircle(wx, wy, r, 32);
+    await createSpaceFromPolygon(polygon, wx, wy);
+    return;
+  }
+
+  if (shape === 'polygon') {
+    let vx = rawWx, vy = rawWy;
+    if (state.pendingPolygon.length > 0) {
+      const last = state.pendingPolygon[state.pendingPolygon.length - 1];
+      [vx, vy] = snapToAxis(last[0], last[1], rawWx, rawWy);
+    }
+    state.pendingPolygon.push([vx, vy]);
+    render();
+  }
+}
+
+async function createSpaceFromPolygon(polygon, centroidX, centroidY) {
+  const name = $('new-space-name').value.trim();
+  if (!name) { notify('Enter a space name first', 'error'); return; }
+
   let parentSpaceId = null;
   let bestZIndex = -1;
   for (const s of state.spaces) {
     if (!s.polygon || s.polygon.length < 3) continue;
-    if (pointInPolygon(wx, wy, s.polygon) && (s.z_index || 0) > bestZIndex) {
+    if (pointInPolygon(centroidX, centroidY, s.polygon) && (s.z_index || 0) > bestZIndex) {
       parentSpaceId = s.id;
       bestZIndex = s.z_index || 0;
     }
@@ -1566,15 +1961,9 @@ async function handleAddSpaceClick(canvasX, canvasY) {
     building_id: state.selectedBuildingId,
     campus_id: state.selectedCampusId,
     floor_index: state.currentFloorIndex,
-    centroid_x: wx,
-    centroid_y: wy,
-    polygon: [
-      [wx - halfW, wy - halfH],
-      [wx + halfW, wy - halfH],
-      [wx + halfW, wy + halfH],
-      [wx - halfW, wy + halfH],
-      [wx - halfW, wy - halfH],
-    ],
+    centroid_x: centroidX,
+    centroid_y: centroidY,
+    polygon,
     is_accessible: true,
     is_navigable: true,
     is_outdoor: false,
@@ -2111,12 +2500,26 @@ async function deleteSpace(space) {
    Escape key handler
    ═══════════════════════════════════════════════ */
 document.addEventListener('keydown', e => {
+  const tag = (e.target && e.target.tagName) || '';
+  const typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+  if (e.key === 'Enter' && !typing &&
+      state.mode === 'addSpace' && currentShape() === 'polygon' &&
+      state.pendingPolygon.length > 0) {
+    e.preventDefault();
+    finishPendingPolygon();
+    return;
+  }
+
   if (e.key === 'Escape') {
     if (state.mode === 'moveSpace') {
       cancelMove();
     }
     if (state.mode === 'placeDuplicate') {
       exitDuplicatePlaceMode();
+    }
+    if (state.mode === 'addSpace' && state.pendingPolygon.length > 0) {
+      cancelPendingPolygon();
     }
     hideContextMenu();
     $('info-overlay').style.display = 'none';
@@ -2132,10 +2535,16 @@ async function reloadCurrentFloor() {
   if (!state.selectedFloorId) return;
   try {
     const display = await api(`/floors/${state.selectedFloorId}/display`);
-    state.spaces = flattenSpaces(display.spaces || []);
-    const floor = display.floor || {};
-    state.currentFloorIndex = floor.floor_index ?? null;
-    state.currentBuildingId = floor.building_id ?? state.selectedBuildingId;
+    const spacesRaw = Array.isArray(display) ? display : (display.spaces || []);
+    state.spaces = flattenSpaces(spacesRaw);
+    try {
+      const floor = await api(`/floors/${state.selectedFloorId}`);
+      state.currentFloorIndex = floor?.floor_index ?? null;
+      state.currentBuildingId = floor?.building_id ?? state.selectedBuildingId;
+    } catch (e) {
+      state.currentFloorIndex = null;
+      state.currentBuildingId = state.selectedBuildingId;
+    }
     fitToCanvas();
     updateMapVisibility();
     await loadFloorConnections(state.selectedFloorId);
@@ -2221,9 +2630,30 @@ $('chat-input').addEventListener('keypress', e => {
 /* ═══════════════════════════════════════════════
    Initialization
    ═══════════════════════════════════════════════ */
-async function loadCampuses() {
+async function loadOrganizations() {
   try {
-    state.campuses = await api('/campuses');
+    state.organizations = await api('/organizations');
+  } catch (e) {
+    state.organizations = [];
+  }
+  const sel = $('organization-select');
+  sel.innerHTML = '<option value="">All organizations</option>';
+  for (const o of state.organizations) {
+    const opt = document.createElement('option');
+    opt.value = o.id;
+    const typeLabel = (o.entity_type || 'OTHER').replace(/_/g, ' ').toLowerCase();
+    opt.textContent = `${o.name} (${typeLabel})`;
+    sel.appendChild(opt);
+  }
+}
+
+async function loadCampuses() {
+  const orgId = state.selectedOrganizationId;
+  const path = orgId
+    ? `/campuses?organization_id=${encodeURIComponent(orgId)}`
+    : '/campuses';
+  try {
+    state.campuses = await api(path);
   } catch (e) {
     state.campuses = [];
   }
@@ -2253,7 +2683,12 @@ async function init() {
     render();
   });
   await loadSpaceTypes();
+  await loadOrganizations();
   await loadCampuses();
+  if (state.organizations.length === 1) {
+    $('organization-select').value = state.organizations[0].id;
+    state.selectedOrganizationId = state.organizations[0].id;
+  }
   if (state.campuses.length === 1) {
     $('campus-select').value = state.campuses[0].id;
     $('campus-select').dispatchEvent(new Event('change'));

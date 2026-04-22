@@ -5,6 +5,11 @@ class NotFoundError(Exception):
         super().__init__(f"{resource} '{id}' not found")
 
 
+class OrganizationNotFound(NotFoundError):
+    def __init__(self, id: str):
+        super().__init__("Organization", id)
+
+
 class CampusNotFound(NotFoundError):
     def __init__(self, id: str):
         super().__init__("Campus", id)

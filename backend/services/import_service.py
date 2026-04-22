@@ -1,8 +1,13 @@
 from db import Database
 from models.map_import import MapImportSchema, SpaceImport, ConnectionNodeImport
-from models.campus import CampusCreate, BuildingCreate, FloorCreate
+from models.campus import (
+    CampusCreate,
+    BuildingCreate,
+    FloorCreate,
+    OrganizationCreate,
+)
 from models.space import SpaceCreate
-from repositories.campus_repo import CampusRepository
+from repositories.campus_repo import CampusRepository, OrganizationRepository
 from repositories.space_repo import SpaceRepository
 from repositories.connection_repo import ConnectionRepository
 from services.geometry_service import (
@@ -20,6 +25,7 @@ embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 class ImportService:
     def __init__(self, db: Database):
+        self.org_repo = OrganizationRepository(db)
         self.campus_repo = CampusRepository(db)
         self.space_repo = SpaceRepository(db)
         self.conn_repo = ConnectionRepository(db)
@@ -28,18 +34,60 @@ class ImportService:
 
     def import_map(self, schema: MapImportSchema) -> dict:
         campus = schema.campus
+        organization = schema.organization
+
+        # 0. Organization (optional). If provided, both Neo4j and PostGIS get it.
+        organization_id = None
+        if organization is not None:
+            organization_id = organization.id
+            self.org_repo.create_organization(
+                OrganizationCreate(
+                    id=organization.id,
+                    name=organization.name,
+                    entity_type=organization.entity_type,
+                    description=organization.description,
+                )
+            )
+            self.postgis.sync_organization({
+                "id": organization.id,
+                "name": organization.name,
+                "entity_type": organization.entity_type,
+                "description": organization.description,
+            })
+        else:
+            organization_id = campus.organization_id
+
+        self.postgis.sync_import(
+            campus_id=campus.id,
+            schema_version=schema.schema_version,
+            payload=schema.model_dump(mode="json"),
+            organization_id=organization_id,
+        )
 
         # 1. Campus
         self.campus_repo.create_campus(
-            CampusCreate(id=campus.id, name=campus.name, description=campus.description)
+            CampusCreate(
+                id=campus.id,
+                name=campus.name,
+                description=campus.description,
+                organization_id=organization_id,
+            )
         )
+        self.postgis.sync_campus({
+            "id": campus.id,
+            "organization_id": organization_id,
+            "name": campus.name,
+            "description": campus.description,
+        })
 
         # 2. Buildings → Floors → Spaces
         for building in campus.buildings:
+            building_org_id = building.organization_id or organization_id
             self.campus_repo.create_building(
                 BuildingCreate(
                     id=building.id,
                     campus_id=campus.id,
+                    organization_id=building_org_id,
                     name=building.name,
                     short_name=building.short_name,
                     address=building.address,
@@ -49,6 +97,18 @@ class ImportService:
                     floor_count=building.floor_count,
                 )
             )
+            self.postgis.sync_building({
+                "id": building.id,
+                "campus_id": campus.id,
+                "organization_id": building_org_id,
+                "name": building.name,
+                "short_name": building.short_name,
+                "address": building.address,
+                "origin_lat": building.origin_lat,
+                "origin_lng": building.origin_lng,
+                "origin_bearing": building.origin_bearing,
+                "floor_count": building.floor_count,
+            })
             for floor in building.floors:
                 self.campus_repo.create_floor(
                     FloorCreate(
@@ -64,9 +124,9 @@ class ImportService:
                     )
                 )
 
-                # Sync floor plan to PostGIS
-                self.postgis.sync_floor_plan({
+                self.postgis.sync_floor({
                     "id": f"{building.id}_{floor.id}",
+                    "organization_id": building_org_id,
                     "campus_id": campus.id,
                     "building_id": building.id,
                     "floor_id": floor.id,
@@ -85,6 +145,7 @@ class ImportService:
                         floor_id=floor.id,
                         building_id=building.id,
                         campus_id=campus.id,
+                        organization_id=building_org_id,
                         floor_index=floor.floor_index,
                         parent_id=None,
                     )
@@ -96,6 +157,7 @@ class ImportService:
                 floor_id=None,
                 building_id=None,
                 campus_id=campus.id,
+                organization_id=organization_id,
                 floor_index=None,
                 parent_id=None,
             )
@@ -107,6 +169,7 @@ class ImportService:
             counts["connections"] += 1
 
         return {
+            "organization_id": organization_id,
             "campus_id": campus.id,
             "spaces_imported": counts["spaces"],
             "connections_imported": counts["connections"],
@@ -118,6 +181,7 @@ class ImportService:
         floor_id: str | None,
         building_id: str | None,
         campus_id: str,
+        organization_id: str | None,
         floor_index: int | None,
         parent_id: str | None,
     ) -> None:
@@ -131,20 +195,20 @@ class ImportService:
 
         if cx is not None and cy is not None:
             self._centroids[space.id] = (cx, cy)
-            
+
         global_lat, global_lng = None, None
         global_polygon = None
-        
+
         if building_id and cx is not None and cy is not None:
             building = self.campus_repo.get_building(building_id)
             if building.get("origin_lat") is not None and building.get("origin_lng") is not None:
                 global_lat, global_lng = local_to_global_coordinates(
-                    cx, cy, 
-                    building["origin_lat"], 
-                    building["origin_lng"], 
+                    cx, cy,
+                    building["origin_lat"],
+                    building["origin_lng"],
                     building.get("origin_bearing") or 0.0
                 )
-                
+
                 if space.polygon:
                     global_polygon = polygon_local_to_global(
                         space.polygon,
@@ -152,7 +216,7 @@ class ImportService:
                         building["origin_lng"],
                         building.get("origin_bearing") or 0.0
                     )
-            
+
         text_to_embed = f"{space.display_name}. Type: {space.space_type}. Tags: {' '.join(space.tags)}"
 
         vector = embedder.encode([text_to_embed])[0].tolist()
@@ -173,6 +237,7 @@ class ImportService:
                 floor_index=floor_index,
                 building_id=building_id,
                 campus_id=campus_id,
+                organization_id=organization_id,
                 floor_id=floor_id,
                 parent_space_id=parent_id,
                 width_m=space.width_m,
@@ -198,6 +263,10 @@ class ImportService:
         # Sync to PostGIS with global coordinates
         self.postgis.sync_space({
             "id": space.id,
+            "organization_id": organization_id,
+            "campus_id": campus_id,
+            "building_id": building_id,
+            "floor_id": floor_id,
             "display_name": space.display_name,
             "space_type": space.space_type.value if hasattr(space.space_type, 'value') else str(space.space_type),
             "floor_index": floor_index,
@@ -216,8 +285,6 @@ class ImportService:
             "capacity": space.capacity,
             "tags": space.tags,
             "metadata": space.metadata,
-            "campus_id": campus_id,
-            "building_id": building_id,
         })
 
         for subspace in space.subspaces:
@@ -226,9 +293,21 @@ class ImportService:
                 floor_id=floor_id,
                 building_id=building_id,
                 campus_id=campus_id,
+                organization_id=organization_id,
                 floor_index=floor_index,
                 parent_id=space.id,
             )
 
     def _import_connection_node(self, conn: ConnectionNodeImport) -> None:
         self.conn_repo.create_connection(conn.from_space_id, conn.to_space_id)
+        connection_type = (
+            conn.connection_type.value
+            if hasattr(conn.connection_type, "value")
+            else (str(conn.connection_type) if conn.connection_type is not None else None)
+        )
+        self.postgis.sync_direct_edge(
+            from_space_id=conn.from_space_id,
+            to_space_id=conn.to_space_id,
+            connection_type=connection_type,
+            is_accessible=bool(getattr(conn, "is_accessible", True)),
+        )

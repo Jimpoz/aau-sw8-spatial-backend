@@ -7,7 +7,10 @@ from models.space import SpaceCreate
 from models.enums import CONN_SPACE_TYPES
 from repositories.connection_repo import ConnectionRepository
 from repositories.space_repo import SpaceRepository
+from repositories.campus_repo import CampusRepository
 from services.geometry_service import compute_traversal_cost, find_shared_edge_midpoint
+from services.postgis_service import PostGISService
+from services.space_sync import build_space_sync_payload
 
 router = APIRouter(prefix="/connections", tags=["connections"])
 
@@ -55,12 +58,13 @@ def create_connection(data: ConnectionCreate, db: Database = Depends(get_db)):
     floor_id = floor_a if floor_a == floor_b else None
 
     # Create the intermediate door/passage node as a Space
-    space_repo.create_space(
+    door_space = space_repo.create_space(
         SpaceCreate(
             id=door_id,
             display_name=data.display_name,
             space_type=data.space_type,
             campus_id=campus_id,
+            floor_id=floor_id,
             centroid_x=cx,
             centroid_y=cy,
             is_accessible=data.is_accessible,
@@ -69,11 +73,24 @@ def create_connection(data: ConnectionCreate, db: Database = Depends(get_db)):
         )
     )
 
+    postgis = PostGISService()
+    postgis.sync_space(
+        build_space_sync_payload(door_space, CampusRepository(db))
+    )
+
     # Create 4 bare CONNECTS_TO edges (A→Door, Door→A, B→Door, Door→B)
     conn_repo.create_connection(data.from_space_id, door_id)
     conn_repo.create_connection(door_id, data.from_space_id)
     conn_repo.create_connection(data.to_space_id, door_id)
     conn_repo.create_connection(door_id, data.to_space_id)
+
+    postgis.sync_connection(
+        from_space_id=data.from_space_id,
+        to_space_id=data.to_space_id,
+        door_space_id=door_id,
+        connection_type=data.space_type.value,
+        is_accessible=bool(data.is_accessible),
+    )
 
     return Connection(
         from_space_id=data.from_space_id,
@@ -112,7 +129,18 @@ def get_connection(from_space_id: str, to_space_id: str, db: Database = Depends(
 
 @router.delete("/{from_space_id}/{to_space_id}", status_code=204)
 def delete_connection(from_space_id: str, to_space_id: str, db: Database = Depends(get_db)):
-    # Find and delete intermediate door nodes between the two spaces
+    conn_types = [t.value for t in CONN_SPACE_TYPES]
+
+    door_rows = db.execute(
+        """
+        MATCH (a:Space {id: $from_id})-[:CONNECTS_TO]->(door:Space)-[:CONNECTS_TO]->(b:Space {id: $to_id})
+        WHERE door.space_type IN $conn_types
+        RETURN DISTINCT door.id AS id
+        """,
+        {"from_id": from_space_id, "to_id": to_space_id, "conn_types": conn_types},
+    )
+    door_ids = [r["id"] for r in door_rows]
+
     result = db.execute_write(
         """
         MATCH (a:Space {id: $from_id})-[:CONNECTS_TO]->(door:Space)-[:CONNECTS_TO]->(b:Space {id: $to_id})
@@ -120,14 +148,15 @@ def delete_connection(from_space_id: str, to_space_id: str, db: Database = Depen
         DETACH DELETE door
         RETURN count(door) AS deleted
         """,
-        {
-            "from_id": from_space_id,
-            "to_id": to_space_id,
-            "conn_types": [t.value for t in CONN_SPACE_TYPES],
-        },
+        {"from_id": from_space_id, "to_id": to_space_id, "conn_types": conn_types},
     )
     if not result or result[0]["deleted"] == 0:
         raise HTTPException(
             status_code=404,
             detail=f"No connection from '{from_space_id}' to '{to_space_id}'",
         )
+
+    postgis = PostGISService()
+    for door_id in door_ids:
+        postgis.delete_connection_group(door_id)
+        postgis.delete_space(door_id)

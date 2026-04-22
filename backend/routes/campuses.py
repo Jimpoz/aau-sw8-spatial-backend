@@ -7,18 +7,28 @@ from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
 from services.import_service import ImportService
 from services.gds_service import GdsService
+from services.postgis_service import PostGISService
 
 router = APIRouter(prefix="/campuses", tags=["campuses"])
 
 
 @router.get("", response_model=list[Campus])
-def list_campuses(db: Database = Depends(get_db)):
-    return CampusRepository(db).list_campuses()
+def list_campuses(
+    organization_id: str | None = None, db: Database = Depends(get_db)
+):
+    return CampusRepository(db).list_campuses(organization_id=organization_id)
 
 
 @router.post("", response_model=Campus, status_code=201)
 def create_campus(data: CampusCreate, db: Database = Depends(get_db)):
-    return CampusRepository(db).create_campus(data)
+    campus = CampusRepository(db).create_campus(data)
+    PostGISService().sync_campus({
+        "id": data.id,
+        "organization_id": data.organization_id,
+        "name": data.name,
+        "description": data.description,
+    })
+    return campus
 
 
 @router.get("/{campus_id}", response_model=Campus)
@@ -36,6 +46,7 @@ def delete_campus(campus_id: str, db: Database = Depends(get_db)):
     except CampusNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     CampusRepository(db).delete_campus(campus_id)
+    PostGISService().delete_campus(campus_id)
 
 
 @router.post("/{campus_id}/import")
@@ -99,8 +110,19 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
             "tags": node.get("tags", []),
         })
 
+    organization = None
+    org_id = campus.get("organization_id") if isinstance(campus, dict) else None
+    if org_id:
+        from repositories.campus_repo import OrganizationRepository
+        from core.exceptions import OrganizationNotFound
+        try:
+            organization = OrganizationRepository(db).get_organization(org_id)
+        except OrganizationNotFound:
+            organization = None
+
     return {
         "schema_version": "1.0",
+        "organization": organization,
         "campus": {
             **campus,
             "buildings": buildings_out,

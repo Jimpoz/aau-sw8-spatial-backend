@@ -6,7 +6,16 @@ from fastapi.responses import JSONResponse
 from core.exceptions import NotFoundError, NavigationError, MapImportError
 from db import get_db
 from models.enums import SpaceType, CONN_SPACE_TYPES
-from routes import campuses, buildings, floors, spaces, connections, navigation, search
+from routes import (
+    organizations,
+    campuses,
+    buildings,
+    floors,
+    spaces,
+    connections,
+    navigation,
+    search,
+)
 from scripts.init_db import apply_schema
 
 
@@ -45,6 +54,7 @@ async def import_error_handler(request: Request, exc: MapImportError):
 
 PREFIX = "/api/v1"
 
+app.include_router(organizations.router, prefix=PREFIX)
 app.include_router(campuses.router, prefix=PREFIX)
 app.include_router(buildings.router, prefix=PREFIX)
 app.include_router(floors.router, prefix=PREFIX)

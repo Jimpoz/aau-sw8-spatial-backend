@@ -11,6 +11,7 @@ class SpaceCreate(BaseModel):
     floor_index: Optional[int] = None
     building_id: Optional[str] = None
     campus_id: Optional[str] = None
+    organization_id: Optional[str] = None
     floor_id: Optional[str] = None
     parent_space_id: Optional[str] = None
     width_m: Optional[float] = None
@@ -62,6 +63,7 @@ class Space(BaseModel):
     floor_index: Optional[int] = None
     building_id: Optional[str] = None
     campus_id: Optional[str] = None
+    organization_id: Optional[str] = None
     width_m: Optional[float] = None
     length_m: Optional[float] = None
     area_m2: Optional[float] = None

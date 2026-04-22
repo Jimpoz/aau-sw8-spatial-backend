@@ -1,6 +1,16 @@
 from enum import Enum
 
 
+class EntityType(str, Enum):
+    """Organization entity types."""
+    UNIVERSITY = "UNIVERSITY"
+    CORPORATION = "CORPORATION"
+    PUBLIC_HEALTH = "PUBLIC_HEALTH"
+    HOSPITAL = "HOSPITAL"
+    GOVERNMENT = "GOVERNMENT"
+    OTHER = "OTHER"
+
+
 class SpaceType(str, Enum):
     # Rooms
     ROOM_GENERIC = "ROOM_GENERIC"

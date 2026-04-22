@@ -1,17 +1,37 @@
 from typing import Optional
 from pydantic import BaseModel
 
+from shared.models.enums import EntityType
+
+
+class OrganizationCreate(BaseModel):
+    id: str
+    name: str
+    entity_type: EntityType = EntityType.OTHER
+    description: Optional[str] = None
+
+
+class Organization(BaseModel):
+    id: str
+    name: str
+    entity_type: EntityType = EntityType.OTHER
+    description: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
 
 class CampusCreate(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    organization_id: Optional[str] = None
 
 
 class Campus(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
+    organization_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -19,6 +39,7 @@ class Campus(BaseModel):
 class BuildingCreate(BaseModel):
     id: str
     campus_id: str
+    organization_id: Optional[str] = None
     name: str
     short_name: Optional[str] = None
     address: Optional[str] = None
@@ -31,6 +52,7 @@ class BuildingCreate(BaseModel):
 class Building(BaseModel):
     id: str
     campus_id: str
+    organization_id: Optional[str] = None
     name: str
     short_name: Optional[str] = None
     address: Optional[str] = None

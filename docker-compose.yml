@@ -9,12 +9,14 @@ services:
       - BACKEND_URL=http://backend:8000
       - ASSISTANT_URL=http://assistant:8001
       - IMAGE_PIPELINE_URL=http://image_pipeline:8002
+      - ML_VISION_URL=${ML_VISION_URL:-http://ml_vision:8000}
       - MIDDLEWARE_DEBUG_UPSTREAMS=${MIDDLEWARE_DEBUG_UPSTREAMS:-false}
       - API_SECRET=${API_SECRET}
     depends_on:
       - backend
       - assistant
       - image_pipeline
+      - ml_vision
 
   backend:
     build:
@@ -27,7 +29,7 @@ services:
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
       - ASSISTANT_URL=http://assistant:8001
-      - SUPABASE_DATABASE_URL=${SUPABASE_DATABASE_URL}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
       - SUPABASE_DB_PASSWORD=${SUPABASE_DB_PASSWORD}
       - SUPABASE_ENABLE_SYNC=${SUPABASE_ENABLE_SYNC:-false}
     volumes:
@@ -64,6 +66,20 @@ services:
     volumes:
       - ./image_pipeline:/app
       - ./shared:/app/shared
+
+  ml_vision:
+    build:
+      context: ../aau-sw8-ml-vision
+      dockerfile: Dockerfile
+    expose:
+      - "8000"
+    environment:
+      - FACILITY_ID=${ML_VISION_FACILITY_ID:-default_facility}
+      - MODEL_ONNX_URL=${ML_VISION_MODEL_ONNX_URL:-https://huggingface.co/zwh20081/yolo26-onnx/resolve/main/yolo26n.onnx}
+      - MODEL_DIR=/app/models
+      - NEO4J_URI=${NEO4J_URI}
+      - NEO4J_USER=${NEO4J_USER}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD}
 
   frontend:
     build:

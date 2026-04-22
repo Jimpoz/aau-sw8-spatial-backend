@@ -1,7 +1,12 @@
 CREATE INDEX space_building_floor_idx IF NOT EXISTS FOR (s:Space) ON (s.building_id, s.floor_index);
 CREATE INDEX space_type_idx IF NOT EXISTS FOR (s:Space) ON (s.space_type);
 CREATE INDEX space_campus_idx IF NOT EXISTS FOR (s:Space) ON (s.campus_id);
+CREATE INDEX space_organization_idx IF NOT EXISTS FOR (s:Space) ON (s.organization_id);
 CREATE INDEX space_traversal_cost_idx IF NOT EXISTS FOR (s:Space) ON (s.traversal_cost);
+CREATE INDEX campus_organization_idx IF NOT EXISTS FOR (c:Campus) ON (c.organization_id);
+CREATE INDEX building_organization_idx IF NOT EXISTS FOR (b:Building) ON (b.organization_id);
+CREATE INDEX building_campus_idx IF NOT EXISTS FOR (b:Building) ON (b.campus_id);
+CREATE INDEX organization_entity_type_idx IF NOT EXISTS FOR (o:Organization) ON (o.entity_type);
 CREATE FULLTEXT INDEX space_search_idx IF NOT EXISTS FOR (s:Space) ON EACH [s.display_name, s.short_name, s.tags_text];
 
 // Index for semanti RAG search
