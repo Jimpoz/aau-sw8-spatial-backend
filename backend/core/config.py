@@ -4,12 +4,10 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
-    neo4j_password: str = "password"
+    neo4j_uri: str
+    neo4j_user: str
+    neo4j_password: str
 
-    supabase_url: str = "https://your-project.supabase.co"
-    supabase_key: str = "your-anon-key"
     supabase_db_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("SUPABASE_DB_URL", "SUPABASE_DATABASE_URL"),
