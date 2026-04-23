@@ -19,6 +19,7 @@ Schema:
 
 from sqlalchemy import (
     create_engine, Column, String, Float, Integer, DateTime, Boolean, ForeignKey, Enum as SQLEnum,
+    or_,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -460,6 +461,58 @@ class PostGISService:
             return True
         except Exception as e:
             print(f"Error deleting building {building_id} from PostGIS: {e}")
+            return False
+
+    def delete_building_cascade(
+        self,
+        building_id: str,
+        space_ids: list[str],
+        floor_ids: list[str],
+    ) -> bool:
+        """Delete every PostGIS row belonging to a building: space_connections
+        touching any of its spaces, the spaces themselves (incl. subclass rows
+        via the FK cascade on `building_spaces`), the floor metadata rows, and
+        finally the building row.
+
+        `space_ids` is the full set of Space node IDs from Neo4j (rooms,
+        subspaces, and any door/passage node that used to connect to them).
+        `floor_ids` are the bare Floor node IDs; the PostGIS floors table keys
+        on `{building_id}_{floor_id}`.
+        """
+        if not self.engine or not settings.supabase_enable_sync:
+            return False
+        try:
+            session = self.SessionLocal()
+
+            if space_ids:
+                session.query(SpaceConnection).filter(
+                    or_(
+                        SpaceConnection.from_space_id.in_(space_ids),
+                        SpaceConnection.to_space_id.in_(space_ids),
+                        SpaceConnection.door_space_id.in_(space_ids),
+                        SpaceConnection.connection_group_id.in_(space_ids),
+                    )
+                ).delete(synchronize_session=False)
+
+                session.query(BuildingSpace).filter(
+                    BuildingSpace.id.in_(space_ids)
+                ).delete(synchronize_session=False)
+
+            if floor_ids:
+                composed = [f"{building_id}_{fid}" for fid in floor_ids]
+                session.query(Floor).filter(
+                    Floor.id.in_(composed)
+                ).delete(synchronize_session=False)
+
+            session.query(Building).filter_by(id=building_id).delete(
+                synchronize_session=False
+            )
+
+            session.commit()
+            session.close()
+            return True
+        except Exception as e:
+            print(f"Error cascading building delete {building_id} in PostGIS: {e}")
             return False
 
     # --- spaces ---

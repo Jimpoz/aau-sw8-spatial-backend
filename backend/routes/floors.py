@@ -13,18 +13,33 @@ router = APIRouter(prefix="/floors", tags=["floors"])
 @router.post("", response_model=Floor, status_code=201)
 def create_floor(data: FloorCreate, db: Database = Depends(get_db)):
     floor = CampusRepository(db).create_floor(data)
-    PostGISService().sync_floor({
-        "id": f"{floor.building_id}_{floor.id}",
-        "campus_id": None,
-        "building_id": floor.building_id,
-        "floor_id": floor.id,
-        "floor_index": floor.floor_index,
-        "display_name": floor.display_name,
-        "floor_plan_url": floor.floor_plan_url,
-        "floor_plan_scale": floor.floor_plan_scale,
-        "floor_plan_origin_x": floor.floor_plan_origin_x,
-        "floor_plan_origin_y": floor.floor_plan_origin_y,
-        "floor_plan_bounds": getattr(floor, "floor_plan_bounds", None),
+    building = CampusRepository(db).get_building(floor["building_id"])
+    postgis = PostGISService()
+    postgis.sync_floor({
+        "id": f"{floor['building_id']}_{floor['id']}",
+        "organization_id": building.get("organization_id"),
+        "campus_id": building.get("campus_id"),
+        "building_id": floor["building_id"],
+        "floor_id": floor["id"],
+        "floor_index": floor.get("floor_index"),
+        "display_name": floor.get("display_name"),
+        "floor_plan_url": floor.get("floor_plan_url"),
+        "floor_plan_scale": floor.get("floor_plan_scale"),
+        "floor_plan_origin_x": floor.get("floor_plan_origin_x"),
+        "floor_plan_origin_y": floor.get("floor_plan_origin_y"),
+        "floor_plan_bounds": floor.get("floor_plan_bounds"),
+    })
+    postgis.sync_building({
+        "id": building["id"],
+        "campus_id": building.get("campus_id"),
+        "organization_id": building.get("organization_id"),
+        "name": building.get("name"),
+        "short_name": building.get("short_name"),
+        "address": building.get("address"),
+        "origin_lat": building.get("origin_lat"),
+        "origin_lng": building.get("origin_lng"),
+        "origin_bearing": building.get("origin_bearing"),
+        "floor_count": building.get("floor_count"),
     })
     return floor
 
@@ -147,24 +162,23 @@ def floor_map_overlay(floor_id: str, db: Database = Depends(get_db)):
 
     try:
         postgis = PostGISService()
-        floor_plan_data = postgis.get_floor_plan(f"{floor.building_id}_{floor_id}")
+        floor_plan_data = postgis.get_floor_plan(f"{floor['building_id']}_{floor_id}")
 
         if not floor_plan_data:
             floor_plan_data = {
-                "floor_plan_scale": floor.floor_plan_scale or 1.0,
-                "floor_plan_origin_x": floor.floor_plan_origin_x or 0.0,
-                "floor_plan_origin_y": floor.floor_plan_origin_y or 0.0,
+                "floor_plan_scale": floor.get("floor_plan_scale") or 1.0,
+                "floor_plan_origin_x": floor.get("floor_plan_origin_x") or 0.0,
+                "floor_plan_origin_y": floor.get("floor_plan_origin_y") or 0.0,
                 "bounds": None,
             }
 
-        # get_building returns a raw Neo4j dict — use .get() for safe access
-        building = CampusRepository(db).get_building(floor.building_id)
+        building = CampusRepository(db).get_building(floor["building_id"])
 
         return {
             "floor_id": floor_id,
-            "building_id": floor.building_id,
-            "floor_index": floor.floor_index,
-            "display_name": floor.display_name,
+            "building_id": floor["building_id"],
+            "floor_index": floor.get("floor_index"),
+            "display_name": floor.get("display_name"),
             "building_origin": {
                 "lat": building.get("origin_lat"),
                 "lng": building.get("origin_lng"),
@@ -174,7 +188,7 @@ def floor_map_overlay(floor_id: str, db: Database = Depends(get_db)):
                 "scale": floor_plan_data.get("floor_plan_scale", 1.0),
                 "origin_x": floor_plan_data.get("floor_plan_origin_x", 0.0),
                 "origin_y": floor_plan_data.get("floor_plan_origin_y", 0.0),
-                "url": floor.floor_plan_url,
+                "url": floor.get("floor_plan_url"),
                 "bounds": floor_plan_data.get("bounds"),
             },
             "spaces_count": len(SpaceRepository(db).get_floor_spaces(floor_id)),

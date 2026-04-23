@@ -13,6 +13,7 @@ from models.campus import (
     FloorCreate,
     OrganizationCreate,
 )
+from models.enums import CONN_SPACE_TYPES
 
 
 def _now() -> str:
@@ -221,6 +222,75 @@ class CampusRepository:
         )
         return [r["b"] for r in result]
 
+    def delete_building(self, building_id: str) -> dict:
+        """Delete a building and everything inside it — floors, spaces (incl.
+        nested subspaces), and any door/passage node that connected to one of
+        those spaces (even if the door was authored cross-floor and lives on
+        another floor).
+
+        Returns the IDs that were removed so the PostGIS mirror can drop the
+        matching rows — `building_spaces` has no FK to `buildings`, so PostGIS
+        can't cascade on its own.
+        """
+        exists = self.db.execute(
+            "MATCH (b:Building {id: $id}) RETURN b.id AS id",
+            {"id": building_id},
+        )
+        if not exists:
+            raise BuildingNotFound(building_id)
+
+        conn_types = [t.value for t in CONN_SPACE_TYPES]
+
+        floor_rows = self.db.execute(
+            "MATCH (:Building {id: $id})-[:HAS_FLOOR]->(f:Floor) RETURN f.id AS id",
+            {"id": building_id},
+        )
+        floor_ids = [r["id"] for r in floor_rows]
+
+        space_rows = self.db.execute(
+            """
+            MATCH (:Building {id: $id})-[:HAS_FLOOR]->(:Floor)-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            RETURN collect(DISTINCT s.id) AS roots, collect(DISTINCT sub.id) AS subs
+            """,
+            {"id": building_id},
+        )
+        space_ids: set[str] = set()
+        if space_rows:
+            space_ids.update(sid for sid in space_rows[0]["roots"] if sid)
+            space_ids.update(sid for sid in space_rows[0]["subs"] if sid)
+
+        door_ids: set[str] = set()
+        if space_ids:
+            door_rows = self.db.execute(
+                """
+                MATCH (s:Space)-[:CONNECTS_TO]-(d:Space)
+                WHERE s.id IN $space_ids AND d.space_type IN $conn_types
+                RETURN DISTINCT d.id AS id
+                """,
+                {"space_ids": list(space_ids), "conn_types": conn_types},
+            )
+            door_ids.update(r["id"] for r in door_rows)
+
+        self.db.execute_write(
+            """
+            MATCH (b:Building {id: $id})
+            OPTIONAL MATCH (b)-[:HAS_FLOOR]->(f:Floor)
+            OPTIONAL MATCH (f)-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            OPTIONAL MATCH (d:Space)
+              WHERE d.id IN $door_ids
+            DETACH DELETE d, sub, s, f, b
+            """,
+            {"id": building_id, "door_ids": list(door_ids)},
+        )
+
+        return {
+            "building_id": building_id,
+            "floor_ids": floor_ids,
+            "space_ids": sorted(space_ids | door_ids),
+        }
+
     # --- Floor ---
 
     def create_floor(self, data: FloorCreate) -> dict:
@@ -237,6 +307,10 @@ class CampusRepository:
                 f.floor_plan_origin_y = $floor_plan_origin_y,
                 f.building_id = $building_id
             MERGE (b)-[:HAS_FLOOR]->(f)
+            WITH b, f
+            MATCH (b)-[:HAS_FLOOR]->(all:Floor)
+            WITH b, f, count(DISTINCT all) AS floor_count
+            SET b.floor_count = floor_count
             RETURN f
             """,
             data.model_dump(),

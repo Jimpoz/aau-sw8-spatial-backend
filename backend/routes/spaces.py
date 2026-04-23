@@ -46,10 +46,13 @@ def update_space(space_id: str, data: SpaceUpdate, db: Database = Depends(get_db
 @router.delete("/{space_id}", status_code=204)
 def delete_space(space_id: str, db: Database = Depends(get_db)):
     try:
-        SpaceRepository(db).delete_space(space_id)
+        door_ids = SpaceRepository(db).delete_space(space_id)
     except SpaceNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     postgis = PostGISService()
+    for door_id in door_ids:
+        postgis.delete_connection_group(door_id)
+        postgis.delete_space(door_id)
     postgis.delete_edges_for_space(space_id)
     postgis.delete_space(space_id)
 

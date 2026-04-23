@@ -199,6 +199,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <button class="btn-secondary btn-half" id="add-building-btn" disabled>+ Building</button>
       <button class="btn-secondary btn-half" id="add-floor-btn" disabled>+ Floor</button>
     </div>
+    <button class="btn-secondary" id="delete-building-btn" disabled style="margin-bottom:10px">Delete Building</button>
     <button class="btn-primary" id="new-map-btn">+ New Map</button>
     <button class="btn-primary" id="export-btn" disabled style="margin-top:6px">Export JSON</button>
   </div>
@@ -1224,6 +1225,7 @@ $('organization-select').addEventListener('change', async function() {
   fSel.disabled = true;
   $('add-building-btn').disabled = true;
   $('add-floor-btn').disabled = true;
+  $('delete-building-btn').disabled = true;
   $('search-input').disabled = true;
   $('export-btn').disabled = true;
   $('chat-input').disabled = true;
@@ -1251,7 +1253,8 @@ $('campus-select').addEventListener('change', async function() {
   $('export-btn').disabled = !id;
   $('add-building-btn').disabled = !id;
   $('add-floor-btn').disabled = true;
-  
+  $('delete-building-btn').disabled = true;
+
   // Enable AI Assistant
   $('chat-input').disabled = !id;
   $('chat-btn').disabled = !id;
@@ -1289,6 +1292,7 @@ $('building-select').addEventListener('change', async function() {
   fSel.innerHTML = '<option value="">Select floor...</option>';
   fSel.disabled = true;
   $('add-floor-btn').disabled = !id;
+  $('delete-building-btn').disabled = !id;
   updateMapVisibility();
 
   if (!id) return;
@@ -1735,6 +1739,28 @@ $('floor-modal-create').addEventListener('click', async () => {
   } catch (e) { /* handled */ }
   finally {
     $('floor-modal-create').disabled = false;
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Delete Building
+   ═══════════════════════════════════════════════ */
+$('delete-building-btn').addEventListener('click', async () => {
+  const buildingId = state.selectedBuildingId;
+  if (!buildingId) return;
+  const selected = state.buildings.find(b => b.id === buildingId);
+  const name = selected ? selected.name : buildingId;
+  if (!window.confirm(
+    `Delete building "${name}" and every floor, space, and connection inside it? This cannot be undone.`
+  )) return;
+  try {
+    $('delete-building-btn').disabled = true;
+    await api(`/buildings/${buildingId}`, { method: 'DELETE' });
+    notify(`Deleted building "${name}"`);
+    $('campus-select').dispatchEvent(new Event('change'));
+  } catch (e) { /* handled */ }
+  finally {
+    $('delete-building-btn').disabled = !state.selectedBuildingId;
   }
 });
 
