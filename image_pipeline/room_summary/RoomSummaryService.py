@@ -2,9 +2,11 @@ from pathlib import Path
 from random import sample
 from typing import Any, Sequence
 
+from .ImageSimilarity import best_view_match, cosine
 from .model_config import resolve_model_selection
 from .NamedRoomSummaryResult import NamedRoomSummaryResult
 from .Neo4jQueryRunner import Neo4jQueryRunner
+from .RoomImageEmbedder import RoomImageEmbedder
 from .RoomImageInput import RoomImageInput
 from .RoomObjectDetectionSetupResult import RoomObjectDetectionSetupResult
 from .RoomObjectDetector import RoomObjectDetector
@@ -28,6 +30,7 @@ class RoomSummaryService:
         max_vector_width: int = 480,
         text_languages: Sequence[str] | None = None,
         text_confidence_threshold: float = 0.4,
+        enable_embeddings: bool = True,
     ) -> None:
         selection = resolve_model_selection(
             config_path=model_config_path,
@@ -57,6 +60,9 @@ class RoomSummaryService:
         self._vectorizer = RoomVectorizer(
             vector_palette_size=vector_palette_size,
             max_vector_width=max_vector_width,
+        )
+        self._embedder: RoomImageEmbedder | None = (
+            RoomImageEmbedder() if enable_embeddings else None
         )
 
         self.model_profile = selection.profile_name
@@ -106,8 +112,19 @@ class RoomSummaryService:
                         source_name=image.source_name,
                         object_counts=counts,
                     ),
+                    direction=image.direction,
                 )
             )
+
+        embedding_model: str | None = None
+        room_embedding: list[float] | None = None
+        if self._embedder is not None and views:
+            view_vectors = self._embedder.embed_batch([img.frame for img in images])
+            for view, vector in zip(views, view_vectors):
+                view.embedding = vector.tolist()
+            pooled = RoomImageEmbedder.mean_pool(view_vectors)
+            room_embedding = pooled.tolist()
+            embedding_model = self._embedder.model_id
 
         return RoomSummaryResult(
             model_profile=self.model_profile,
@@ -115,6 +132,8 @@ class RoomSummaryService:
             overall_object_counts=overall_object_counts,
             overall_text_counts=overall_text_counts,
             views=views,
+            embedding_model=embedding_model,
+            room_embedding=room_embedding,
         )
 
     def summarize_room(
@@ -166,6 +185,10 @@ class RoomSummaryService:
             stored_image_count=stored_image_count,
             stored_views=stored_views,
         )
+        view_embeddings: dict[str, list[float]] = {}
+        for view in result.views:
+            if view.direction and view.embedding is not None:
+                view_embeddings[view.direction] = view.embedding
         # Persist both the generated summaries and the original frames for later graph queries.
         stored_room_name = self._room_summary_repository(conn).replace_room_detection_setup(
             room_name=normalized_room_name,
@@ -179,6 +202,9 @@ class RoomSummaryService:
             ],
             stored_views=selected_views,
             room_summary=[view.to_dict() for view in result.views],
+            room_embedding=result.room_embedding,
+            view_embeddings=view_embeddings,
+            embedding_model=result.embedding_model,
         )
         return RoomObjectDetectionSetupResult(
             room_name=stored_room_name,
@@ -190,6 +216,88 @@ class RoomSummaryService:
             stored_views=selected_views,
             room_summary=result.views,
         )
+
+    def compare_rooms(
+        self,
+        room_a: str,
+        room_b: str,
+        conn: Any,
+        mode: str = "room",
+    ) -> dict[str, Any]:
+        if mode not in ("room", "max_view"):
+            raise ValueError("mode must be 'room' or 'max_view'.")
+
+        repo = self._room_summary_repository(conn)
+        record_a = repo.get_room_embedding(room_a)
+        record_b = repo.get_room_embedding(room_b)
+        if record_a is None:
+            raise LookupError(f"Room {room_a!r} has no stored embedding.")
+        if record_b is None:
+            raise LookupError(f"Room {room_b!r} has no stored embedding.")
+
+        result: dict[str, Any] = {
+            "room_a": record_a["room_name"],
+            "room_b": record_b["room_name"],
+            "mode": mode,
+            "model": record_a.get("model") or record_b.get("model"),
+        }
+
+        if mode == "room":
+            result["score"] = cosine(record_a["room_embedding"], record_b["room_embedding"])
+            result["best_match"] = None
+            return result
+
+        score, a_view, b_view = best_view_match(
+            record_a["view_embeddings"],
+            record_b["view_embeddings"],
+        )
+        result["score"] = score
+        result["best_match"] = (
+            {"a_view": a_view, "b_view": b_view}
+            if a_view is not None and b_view is not None
+            else None
+        )
+        return result
+
+    def nearest_rooms(
+        self,
+        room: str,
+        conn: Any,
+        top_k: int = 5,
+        include_self: bool = False,
+    ) -> dict[str, Any]:
+        repo = self._room_summary_repository(conn)
+        anchor = repo.get_room_embedding(room)
+        if anchor is None:
+            raise LookupError(f"Room {room!r} has no stored embedding.")
+
+        others = repo.list_rooms_with_embeddings()
+        scored: list[dict[str, Any]] = []
+        for candidate in others:
+            if not include_self and candidate["space_id"] == anchor["space_id"]:
+                continue
+            scored.append(
+                {
+                    "room_name": candidate["room_name"],
+                    "space_id": candidate["space_id"],
+                    "score": cosine(anchor["room_embedding"], candidate["room_embedding"]),
+                }
+            )
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return {
+            "room": anchor["room_name"],
+            "top_k": top_k,
+            "matches": scored[: max(top_k, 0)],
+        }
+
+    def compare_frames(self, frame_a: "Any", frame_b: "Any") -> dict[str, Any]:
+        if self._embedder is None:
+            raise RuntimeError("Embeddings are disabled on this service instance.")
+        vectors = self._embedder.embed_batch([frame_a, frame_b])
+        return {
+            "model": self._embedder.model_id,
+            "score": cosine(vectors[0], vectors[1]),
+        }
 
     @staticmethod
     def _merge_object_counts(

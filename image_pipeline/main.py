@@ -227,6 +227,78 @@ def get_room_names() -> dict[str, list[str]]:
     return _get_room_names()
 
 
+@app.get(f"{PREFIX}/room-summary/similarity")
+def compare_rooms_similarity(
+    room_a: str = Query(..., description="First room name to compare."),
+    room_b: str = Query(..., description="Second room name to compare."),
+    mode: str = Query(
+        "room",
+        description="'room' for pooled embedding cosine, 'max_view' for best per-view pair.",
+    ),
+) -> dict[str, object]:
+    try:
+        return get_room_summary_service().compare_rooms(
+            room_a=room_a,
+            room_b=room_b,
+            conn=get_neo4j_driver(),
+            mode=mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Similarity failed: {exc}") from exc
+
+
+@app.get(f"{PREFIX}/room-summary/similarity/nearest")
+def nearest_rooms(
+    room: str = Query(..., description="Anchor room name."),
+    top_k: int = Query(5, ge=1, le=100, description="Number of nearest rooms to return."),
+    include_self: bool = Query(False, description="Include the anchor room in results."),
+) -> dict[str, object]:
+    try:
+        return get_room_summary_service().nearest_rooms(
+            room=room,
+            conn=get_neo4j_driver(),
+            top_k=top_k,
+            include_self=include_self,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Nearest rooms failed: {exc}") from exc
+
+
+@app.post(f"{PREFIX}/room-summary/similarity/ad-hoc")
+async def compare_two_images(
+    image_a: UploadFile = File(..., description="First image."),
+    image_b: UploadFile = File(..., description="Second image."),
+) -> dict[str, object]:
+    images = [image_a, image_b]
+    try:
+        frames: list[np.ndarray] = []
+        for index, upload in enumerate(images, start=1):
+            payload = await upload.read()
+            if not payload:
+                raise ValueError(f"Uploaded image_{index} is empty.")
+            buffer = np.frombuffer(payload, dtype=np.uint8)
+            frame = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+            if frame is None:
+                raise ValueError(
+                    f"Uploaded file {upload.filename or f'image_{index}'} is not a valid image."
+                )
+            frames.append(frame)
+        return get_room_summary_service().compare_frames(frames[0], frames[1])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Image comparison failed: {exc}") from exc
+    finally:
+        for image in images:
+            await image.close()
+
+
 @app.post(f"{PREFIX}/room-summary")
 async def summarize_room(
     north_image: UploadFile = File(..., description="First image in clockwise order: north."),
