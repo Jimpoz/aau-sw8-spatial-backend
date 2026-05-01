@@ -47,7 +47,12 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def issue_token(user_id: str, organization_id: str | None, role: str | None) -> tuple[str, datetime]:
+def issue_token(
+    user_id: str,
+    organization_id: str | None,
+    role: str | None,
+    organization_ids: list[str] | None = None,
+) -> tuple[str, datetime]:
     if not settings.auth_jwt_secret:
         raise AuthError(
             "Auth is not configured on this server (AUTH_JWT_SECRET unset)",
@@ -61,6 +66,7 @@ def issue_token(user_id: str, organization_id: str | None, role: str | None) -> 
         "iat": int(iat.timestamp()),
         "exp": int(exp.timestamp()),
         "org_id": organization_id,
+        "org_ids": organization_ids or ([organization_id] if organization_id else []),
         "role": role,
         "typ": "access",
     }
@@ -426,6 +432,7 @@ class AuthService:
 
             org_id = chosen.organization_id if chosen else None
             role_value = chosen.role.value if chosen else None
+            all_org_ids = [m.organization_id for m in memberships]
 
             # Password is good. Clear the rate-limit slate for this email so
             # a legitimate user who fat-fingered earlier doesn't stay locked.
@@ -475,7 +482,7 @@ class AuthService:
             )
             session.commit()
 
-            token, exp = issue_token(user.id, org_id, role_value)
+            token, exp = issue_token(user.id, org_id, role_value, organization_ids=all_org_ids)
             return {
                 "mfa_required": False,
                 "user": {
@@ -567,6 +574,10 @@ class AuthService:
                     raise AuthError("Invalid credentials", status_code=401)
 
             role_value = membership.role.value if membership else None
+            all_org_ids = [
+                m.organization_id
+                for m in session.query(OrganizationMember).filter_by(user_id=user.id).all()
+            ]
 
             self._audit(
                 session, action="login_mfa", success=True,
@@ -577,7 +588,7 @@ class AuthService:
             )
             session.commit()
 
-            token, exp = issue_token(user.id, org_id_claim, role_value)
+            token, exp = issue_token(user.id, org_id_claim, role_value, organization_ids=all_org_ids)
             return {
                 "user": {
                     "id": user.id,

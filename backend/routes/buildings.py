@@ -15,7 +15,7 @@ def list_visible_buildings(
     db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
-    return CampusRepository(db).list_visible_buildings(org_id=principal.org_id)
+    return CampusRepository(db).list_visible_buildings(org_ids=list(principal.org_ids))
 
 
 @router.post("", response_model=Building, status_code=201)

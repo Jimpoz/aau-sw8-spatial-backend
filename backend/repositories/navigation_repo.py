@@ -20,6 +20,8 @@ RETURN
         campus_id: n.campus_id,
         centroid_x: n.centroid_x,
         centroid_y: n.centroid_y,
+        centroid_lat: n.centroid_lat,
+        centroid_lng: n.centroid_lng,
         traversal_cost: n.traversal_cost
     }] AS path_nodes,
     totalCost
@@ -42,6 +44,8 @@ RETURN
         campus_id: n.campus_id,
         centroid_x: n.centroid_x,
         centroid_y: n.centroid_y,
+        centroid_lat: n.centroid_lat,
+        centroid_lng: n.centroid_lng,
         traversal_cost: n.traversal_cost
     }] AS path_nodes,
     reduce(cost = 0.0, n IN nodes(path) | cost + coalesce(n.traversal_cost, 0.0)) AS totalCost

@@ -64,6 +64,8 @@ class NavigationService:
                 building_id=node.get("building_id"),
                 centroid_x=node.get("centroid_x"),
                 centroid_y=node.get("centroid_y"),
+                centroid_lat=node.get("centroid_lat"),
+                centroid_lng=node.get("centroid_lng"),
                 instruction=_instruction(node) if i > 0 else None,
                 cost=node.get("traversal_cost"),
             )

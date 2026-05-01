@@ -137,17 +137,18 @@ class CampusRepository:
             )
         return result[0]["c"]
 
-    def list_visible_campuses(self, org_id: str | None) -> list[dict]:
+    def list_visible_campuses(self, org_ids: list[str] | None) -> list[dict]:
+        ids = list(org_ids or [])
         result = self.db.execute(
             """
             MATCH (c:Campus)
             WHERE coalesce(c.is_public, false) = true
-               OR ($org_id IS NOT NULL AND c.organization_id = $org_id)
+               OR (size($org_ids) > 0 AND c.organization_id IN $org_ids)
             OPTIONAL MATCH (org:Organization {id: c.organization_id})
             RETURN c, org.name AS organization_name
             ORDER BY coalesce(org.name, ''), c.name
             """,
-            {"org_id": org_id},
+            {"org_ids": ids},
         )
         return [
             {**row["c"], "organization_name": row["organization_name"]}
@@ -242,12 +243,13 @@ class CampusRepository:
         )
         return [r["b"] for r in result]
 
-    def list_visible_buildings(self, org_id: str | None) -> list[dict]:
+    def list_visible_buildings(self, org_ids: list[str] | None) -> list[dict]:
+        ids = list(org_ids or [])
         result = self.db.execute(
             """
             MATCH (c:Campus)-[:HAS_BUILDING]->(b:Building)
             WHERE coalesce(c.is_public, false) = true
-               OR ($org_id IS NOT NULL AND c.organization_id = $org_id)
+               OR (size($org_ids) > 0 AND c.organization_id IN $org_ids)
             WITH c, b
             WHERE b.origin_lat IS NOT NULL AND b.origin_lng IS NOT NULL
             OPTIONAL MATCH (org:Organization {id: c.organization_id})
@@ -265,7 +267,7 @@ class CampusRepository:
               coalesce(c.is_public, false) AS is_public
             ORDER BY coalesce(org.name, ''), c.name, b.name
             """,
-            {"org_id": org_id},
+            {"org_ids": ids},
         )
         return result
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from db import Database, get_db
 from core.auth_principal import Principal, get_principal, require_org_match, require_role
 from core.exceptions import CampusNotFound
@@ -23,11 +23,49 @@ def list_campuses(
 
 @router.get("/visible", response_model=list[VisibleCampus])
 def list_visible_campuses(
+    request: Request,
     db: Database = Depends(get_db),
     principal: Principal = Depends(get_principal),
 ):
     """Flat list of campuses the caller can see — their org's campuses plus any public ones."""
-    return CampusRepository(db).list_visible_campuses(org_id=principal.org_id)
+    # Diagnostic logs to determine whether the gateway injected identity headers
+    print(
+        "[VISIBLE_CAMPUSES] request headers:",
+        "x-user-id=" + str(request.headers.get("x-user-id")),
+        "x-org-id=" + str(request.headers.get("x-org-id")),
+        "x-org-ids=" + str(request.headers.get("x-org-ids")),
+        "authorization-present=" + str(bool(request.headers.get("authorization"))),
+    )
+    print(
+        f"[VISIBLE_CAMPUSES] principal: user_id={principal.user_id} active_org={principal.org_id} "
+        f"org_ids={list(principal.org_ids)} role={principal.role} is_mapmaker={principal.is_mapmaker}"
+    )
+    # Prefer principal.org_ids; fall back to caller-supplied header when empty.
+    org_ids = list(principal.org_ids)
+    if not org_ids:
+        hdr = request.headers.get("x-org-ids") or request.headers.get("x-org-id")
+        if hdr:
+            try:
+                import json as _json
+
+                parsed = _json.loads(hdr)
+                if isinstance(parsed, list):
+                    org_ids = parsed
+                elif isinstance(parsed, str):
+                    org_ids = [parsed]
+            except Exception:
+                # Not JSON — allow comma-separated or single value
+                if isinstance(hdr, str):
+                    org_ids = [s.strip() for s in hdr.split(",") if s.strip()]
+                else:
+                    org_ids = [hdr]
+
+    rows = CampusRepository(db).list_visible_campuses(org_ids=org_ids)
+    print(
+        f"[VISIBLE_CAMPUSES] used_org_ids={org_ids} returned {len(rows)} campuses; "
+        f"org_ids_in_rows={[r.get('organization_id') for r in rows]}; ids={[r.get('id') for r in rows]}"
+    )
+    return rows
 
 
 @router.post("", response_model=Campus, status_code=201)

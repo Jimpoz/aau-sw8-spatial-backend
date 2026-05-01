@@ -331,3 +331,33 @@ class SpaceRepository:
             {"campus_id": campus_id, "query": query},
         )
         return [_from_neo4j(r["s"]) for r in result]
+
+    def search_all(self, query: str, limit: int = 50) -> list[dict]:
+        result = self.db.execute(
+            """
+            CALL db.index.fulltext.queryNodes('space_search_idx', $query)
+            YIELD node, score
+            WHERE node.is_navigable = true
+                AND NOT node.space_type STARTS WITH 'DOOR_'
+                AND node.space_type <> 'PASSAGE'
+            RETURN node AS s, score
+            ORDER BY score DESC
+            LIMIT $limit
+            """,
+            {"query": query, "limit": limit},
+        )
+        return [_from_neo4j(r["s"]) for r in result]
+
+    def nearest_space(self, lat: float, lon: float, limit: int = 1) -> list[dict]:
+        result = self.db.execute(
+            """
+            MATCH (s:Space)
+            WHERE s.centroid_lat IS NOT NULL AND s.centroid_lon IS NOT NULL AND s.is_navigable = true
+            WITH s, point({latitude: s.centroid_lat, longitude: s.centroid_lon}) AS p
+            RETURN s, distance(p, point({latitude: $lat, longitude: $lon})) AS dist
+            ORDER BY dist ASC
+            LIMIT $limit
+            """,
+            {"lat": lat, "lon": lon, "limit": limit},
+        )
+        return [_from_neo4j(r["s"]) for r in result]

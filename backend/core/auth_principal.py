@@ -19,6 +19,7 @@ class Principal:
     org_id: str | None
     role: str | None
     is_mapmaker: bool = False
+    org_ids: tuple[str, ...] = ()
 
     @property
     def is_authenticated(self) -> bool:
@@ -43,10 +44,16 @@ def get_principal(request: Request) -> Principal:
             role="owner",
             is_mapmaker=True,
         )
+    org_ids_header = request.headers.get("x-org-ids") or ""
+    org_ids = tuple(o.strip() for o in org_ids_header.split(",") if o.strip())
+    active_org_id = request.headers.get("x-org-id")
+    if active_org_id and active_org_id not in org_ids:
+        org_ids = (active_org_id, *org_ids)
     return Principal(
         user_id=request.headers.get("x-user-id"),
-        org_id=request.headers.get("x-org-id"),
+        org_id=active_org_id,
         role=request.headers.get("x-user-role"),
+        org_ids=org_ids,
     )
 
 

@@ -14,6 +14,7 @@ services:
       - API_SECRET=${API_SECRET}
       - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-}
       - AUTH_JWT_ISSUER=${AUTH_JWT_ISSUER:-ariadne-backend}
+      - ALLOW_IDENTITY_PASSTHROUGH=${ALLOW_IDENTITY_PASSTHROUGH:-false}
     depends_on:
       - backend
       - assistant

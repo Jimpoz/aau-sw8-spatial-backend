@@ -15,7 +15,7 @@ ML_VISION_URL = os.getenv("ML_VISION_URL", "http://ml_vision:8000")
 API_SECRET = os.getenv("API_SECRET", "")
 AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")
 AUTH_JWT_ISSUER = os.getenv("AUTH_JWT_ISSUER", "ariadne-backend")
-_IDENTITY_HEADERS = ("x-user-id", "x-org-id", "x-user-role")
+_IDENTITY_HEADERS = ("x-user-id", "x-org-id", "x-org-ids", "x-user-role")
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -23,6 +23,7 @@ def _env_flag(name: str, default: str = "false") -> bool:
 
 
 MIDDLEWARE_DEBUG_UPSTREAMS = _env_flag("MIDDLEWARE_DEBUG_UPSTREAMS")
+ALLOW_IDENTITY_PASSTHROUGH = _env_flag("ALLOW_IDENTITY_PASSTHROUGH")
 
 
 class CampusListItem(BaseModel):
@@ -124,15 +125,40 @@ def _apply_identity_headers(headers: dict[str, str], claims: dict | None) -> Non
     """Strip any caller-supplied identity headers (anti-spoofing) and, when a
     JWT was successfully decoded, stamp the trusted values from the claims.
     Mutates `headers` in place."""
-    for h in _IDENTITY_HEADERS:
-        headers.pop(h, None)
-        headers.pop(h.title(), None)
+    # If JWT auth is not configured, allow caller-supplied identity headers
+    # to pass through when no JWT claims were decoded. This makes local
+    # development easier — clients can set `x-org-ids` manually — while
+    # preserving anti-spoofing when a JWT secret is configured.
+    if not AUTH_JWT_SECRET:
+        if not claims:
+            return
+        # If claims are present even in dev mode, override any incoming headers.
+        for h in _IDENTITY_HEADERS:
+            headers.pop(h, None)
+            headers.pop(h.title(), None)
+    else:
+        # Production / secured mode: by default strip identity headers first.
+        # Optionally allow caller-supplied identity headers to pass through
+        # when no Authorization header is present and the env flag is set.
+        auth_present = bool(headers.get("authorization") or headers.get("Authorization"))
+        if not claims and ALLOW_IDENTITY_PASSTHROUGH and not auth_present:
+            # Let caller-supplied identity headers pass through (dev convenience).
+            return
+        for h in _IDENTITY_HEADERS:
+            headers.pop(h, None)
+            headers.pop(h.title(), None)
+
     if not claims:
         return
+
     if claims.get("sub"):
         headers["x-user-id"] = str(claims["sub"])
     if claims.get("org_id"):
         headers["x-org-id"] = str(claims["org_id"])
+    org_ids = claims.get("org_ids")
+    if isinstance(org_ids, list) and org_ids:
+        # CSV — single header, parsed back into a list at the backend.
+        headers["x-org-ids"] = ",".join(str(o) for o in org_ids if o)
     if claims.get("role"):
         headers["x-user-role"] = str(claims["role"])
 

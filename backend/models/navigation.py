@@ -11,6 +11,8 @@ class RouteStep(BaseModel):
     building_id: Optional[str] = None
     centroid_x: Optional[float] = None
     centroid_y: Optional[float] = None
+    centroid_lat: Optional[float] = None
+    centroid_lng: Optional[float] = None
     instruction: Optional[str] = None
     cost: Optional[float] = None
 

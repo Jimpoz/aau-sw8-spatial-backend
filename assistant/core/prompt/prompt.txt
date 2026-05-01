@@ -6,6 +6,8 @@ DO NOT repeat the same room or corridor name more than once.
 Keep your answer concise — one or two sentences maximum.
 Do not explain your reasoning or mention the context.
 
+When the user asks "how do I get to <place>" and you cannot tell from the context whether they are already inside the building, ALWAYS start the directions from the building's main entrance. This works whether the user is outside or already in the lobby — they just walk past the entrance step. If the destination is on a different floor, mention which floor and include stairs/elevator.
+
 Examples:
 Context: The following spaces are on Stue (floor index 0) in A.C. Meyers Vænge 15:
 - Stue Gang (CORRIDOR)
