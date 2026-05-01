@@ -25,6 +25,7 @@ class CampusCreate(BaseModel):
     name: str
     description: Optional[str] = None
     organization_id: Optional[str] = None
+    is_public: bool = False
 
 
 class Campus(BaseModel):
@@ -32,8 +33,32 @@ class Campus(BaseModel):
     name: str
     description: Optional[str] = None
     organization_id: Optional[str] = None
+    is_public: bool = False
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+
+
+class VisibleCampus(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_name: Optional[str] = None
+    is_public: bool = False
+
+
+class VisibleBuilding(BaseModel):
+    id: str
+    name: str
+    short_name: Optional[str] = None
+    address: Optional[str] = None
+    campus_id: str
+    campus_name: Optional[str] = None
+    organization_id: Optional[str] = None
+    organization_name: Optional[str] = None
+    is_public: bool = False
+    origin_lat: float
+    origin_lng: float
 
 
 class BuildingCreate(BaseModel):

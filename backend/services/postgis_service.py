@@ -15,11 +15,16 @@ Schema:
     └── other_spaces
   floors          (floor plans + bounds)
   imports         (raw import JSON payloads)
+
+Auth & tenancy:
+  app_users            (login identities, bcrypt password_hash)
+  organization_members (which user has which role in which org)
+  audit_log            (append-only record of auth + privileged actions)
 """
 
 from sqlalchemy import (
     create_engine, Column, String, Float, Integer, DateTime, Boolean, ForeignKey, Enum as SQLEnum,
-    or_,
+    or_, text,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -31,6 +36,7 @@ from urllib.parse import urlparse, urlunparse, quote
 import json
 import enum
 from core.config import settings
+from core.request_context import current_is_service, current_org_id
 from shapely.geometry import Polygon
 
 Base = declarative_base()
@@ -44,6 +50,13 @@ class EntityType(enum.Enum):
     HOSPITAL = "HOSPITAL"
     GOVERNMENT = "GOVERNMENT"
     OTHER = "OTHER"
+
+
+class OrgRole(enum.Enum):
+    """Role a user holds inside an organization."""
+    OWNER = "owner"
+    EDITOR = "editor"
+    VIEWER = "viewer"
 
 
 def _safe_db_url(raw_url: str) -> str:
@@ -78,6 +91,76 @@ class Organization(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class AppUser(Base):
+    """Login identity. Password is stored as a bcrypt hash."""
+    __tablename__ = "app_users"
+
+    id = Column(String, primary_key=True)
+    email = Column(String, nullable=False, unique=True, index=True)
+    password_hash = Column(String, nullable=False)
+    full_name = Column(String)
+    is_active = Column(Boolean, default=True, nullable=False)
+    mfa_enabled = Column(Boolean, default=False, nullable=False)
+    mfa_method = Column(String, default="totp", nullable=False)
+    mfa_secret = Column(String)
+    mfa_recovery_codes = Column(JSONB)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class OrganizationMember(Base):
+    """Mapping table: which user has which role in which organization.
+
+    A user can belong to multiple organizations, with a different role in each."""
+    __tablename__ = "organization_members"
+
+    user_id = Column(
+        String, ForeignKey("app_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    organization_id = Column(
+        String, ForeignKey("organizations.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role = Column(SQLEnum(OrgRole), nullable=False, default=OrgRole.VIEWER)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PasswordResetToken(Base):
+    """One-time token for the forgot-password / reset flow."""
+    __tablename__ = "password_reset_tokens"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(
+        String, ForeignKey("app_users.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    token_hash = Column(String, nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    used_at = Column(DateTime)
+    ip_address = Column(String)
+    user_agent = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AuditLog(Base):
+    """Append-only record of auth + privileged actions. Never updated, never
+    deleted. `subject_user_id` may be NULL for failed login attempts where the
+    email did not resolve to a known user."""
+    __tablename__ = "audit_log"
+
+    id = Column(String, primary_key=True)
+    subject_user_id = Column(String, ForeignKey("app_users.id", ondelete="SET NULL"), index=True)
+    subject_email = Column(String, index=True)
+    organization_id = Column(String, ForeignKey("organizations.id", ondelete="SET NULL"), index=True)
+    action = Column(String, nullable=False, index=True)
+    success = Column(Boolean, nullable=False, default=True)
+    ip_address = Column(String)
+    user_agent = Column(String)
+    detail = Column(JSONB)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class Campus(Base):
     """Campus that belongs to an organization."""
     __tablename__ = "campuses"
@@ -88,12 +171,15 @@ class Campus(Base):
     )
     name = Column(String, nullable=False)
     description = Column(String)
+    is_public = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Building(Base):
-    """Building that belongs to a campus."""
+    """Building that belongs to a campus. ``is_public`` is denormalized
+    from the parent campus so RLS policies don't need a subselect on every
+    read; ``CampusRepository.set_public`` keeps the children in sync."""
     __tablename__ = "buildings"
 
     id = Column(String, primary_key=True)
@@ -108,6 +194,7 @@ class Building(Base):
     origin_lng = Column(Float)
     origin_bearing = Column(Float, default=0.0)
     floor_count = Column(Integer)
+    is_public = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -236,7 +323,8 @@ _MODEL_BY_CATEGORY = {
 
 
 class Floor(Base):
-    """Floor plan metadata + bounding polygon."""
+    """Floor plan metadata + bounding polygon. ``is_public`` is denormalized
+    from the parent campus, kept in sync by ``CampusRepository.set_public``."""
     __tablename__ = "floors"
 
     id = Column(String, primary_key=True)
@@ -251,6 +339,7 @@ class Floor(Base):
     floor_plan_origin_x = Column(Float)
     floor_plan_origin_y = Column(Float)
     bounds_geometry = Column(Geometry("POLYGON", srid=0))
+    is_public = Column(Boolean, default=False, nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -292,30 +381,126 @@ class SpaceConnection(Base):
 
 
 # --- Service ---
+_shared_engine = None
+_shared_session_local = None
+_schema_initialized = False
+
 
 class PostGISService:
     """Handles synchronization of building data to PostGIS."""
 
     def __init__(self):
+        global _shared_engine, _shared_session_local, _schema_initialized
+
         if not settings.supabase_enable_sync or not settings.supabase_db_url:
             self.engine = None
             self.SessionLocal = None
             return
 
-        self.engine = create_engine(
-            _safe_db_url(settings.supabase_db_url),
-            echo=False,
-            pool_size=5,
-            max_overflow=10,
-        )
-        self.SessionLocal = sessionmaker(
-            autocommit=False, autoflush=False, bind=self.engine,
-        )
-        self._init_db()
+        if _shared_engine is None:
+            _shared_engine = create_engine(
+                _safe_db_url(settings.supabase_db_url),
+                echo=False,
+                pool_size=2,
+                max_overflow=5,
+                pool_pre_ping=True,
+                pool_recycle=300,
+            )
+            _shared_session_local = sessionmaker(
+                autocommit=False, autoflush=False, bind=_shared_engine,
+            )
+
+        self.engine = _shared_engine
+        self.SessionLocal = _shared_session_local
+
+        if not _schema_initialized:
+            self._init_db()
+            _schema_initialized = True
 
     def _init_db(self):
         if self.engine:
             Base.metadata.create_all(bind=self.engine)
+            self._ensure_columns()
+
+    _ADDED_COLUMNS = (
+        ("campuses", "is_public", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("buildings", "is_public", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("floors", "is_public", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("app_users", "mfa_method", "VARCHAR NOT NULL DEFAULT 'totp'"),
+    )
+
+    def _ensure_columns(self) -> None:
+        try:
+            with self.engine.begin() as conn:
+                for table, col, ddl in self._ADDED_COLUMNS:
+                    conn.execute(text(
+                        f'ALTER TABLE "{table}" ADD COLUMN IF NOT EXISTS "{col}" {ddl}'
+                    ))
+        except Exception as exc:
+            print(f"[PostGISService] _ensure_columns failed: {exc}")
+
+    # --- row-level security ---
+    _RLS_PUBLIC_READ_TABLES = ("campuses", "buildings", "floors")
+    _RLS_TABLES = ("campuses", "buildings", "floors", "imports")
+
+    def apply_rls_policies(self) -> bool:
+        """Enable RLS + install per-tenant policies on org-scoped tables.
+
+        Idempotent: drops the policy by name and recreates it, so schema
+        churn (renames, additional tables) is picked up on the next cold
+        start. The policy admits a row when EITHER the connecting session
+        is acting as a service (``app.is_service = 'true'``) OR the row's
+        ``organization_id`` matches ``app.org_id``. For tables that opt in
+        via ``_RLS_PUBLIC_READ_TABLES`` the USING clause additionally admits
+        ``is_public = true`` so personal-account users (no org context) can
+        read public places like malls or airports. WITH CHECK stays strict
+        so anonymous users can't create or edit public rows.
+
+        The ``true`` argument to ``current_setting`` makes the GUC missing
+        case return NULL instead of raising, so untagged sessions simply
+        fail the policy rather than crashing the query."""
+        if not self.engine:
+            return False
+        try:
+            with self.engine.begin() as conn:
+                for table in self._RLS_TABLES:
+                    public_read = table in self._RLS_PUBLIC_READ_TABLES
+                    using_clause = (
+                        "current_setting('app.is_service', true) = 'true' "
+                        "OR organization_id = current_setting('app.org_id', true)"
+                    )
+                    if public_read:
+                        using_clause += " OR is_public = true"
+                    conn.execute(text(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY'))
+                    conn.execute(text(f'DROP POLICY IF EXISTS org_isolation ON "{table}"'))
+                    conn.execute(text(
+                        f'''
+                        CREATE POLICY org_isolation ON "{table}"
+                            USING ({using_clause})
+                            WITH CHECK (
+                                current_setting('app.is_service', true) = 'true'
+                                OR organization_id = current_setting('app.org_id', true)
+                            )
+                        '''
+                    ))
+            return True
+        except Exception as exc:
+            print(f"[PostGISService] apply_rls_policies failed: {exc}")
+            return False
+
+    def _open_session(self):
+        if not self.SessionLocal:
+            return None
+        session = self.SessionLocal()
+        if not settings.auth_rls_enabled:
+            return session
+        org_id = current_org_id.get()
+        is_service = current_is_service.get()
+        if is_service:
+            session.execute(text("SET LOCAL app.is_service = 'true'"))
+        if org_id:
+            session.execute(text("SET LOCAL app.org_id = :org_id"), {"org_id": org_id})
+        return session
 
     # --- organizations ---
 
@@ -324,7 +509,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Organization).filter_by(
                 id=org_data["id"]
             ).first()
@@ -362,7 +547,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Organization).filter_by(id=organization_id).first()
             if record:
                 session.delete(record)
@@ -379,7 +564,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Campus).filter_by(id=campus_data["id"]).first()
             if record:
                 record.organization_id = campus_data.get(
@@ -387,6 +572,8 @@ class PostGISService:
                 )
                 record.name = campus_data.get("name", record.name)
                 record.description = campus_data.get("description", record.description)
+                if "is_public" in campus_data:
+                    record.is_public = bool(campus_data["is_public"])
                 record.updated_at = datetime.utcnow()
             else:
                 record = Campus(
@@ -394,6 +581,7 @@ class PostGISService:
                     organization_id=campus_data.get("organization_id"),
                     name=campus_data.get("name", ""),
                     description=campus_data.get("description"),
+                    is_public=bool(campus_data.get("is_public", False)),
                 )
                 session.add(record)
             session.commit()
@@ -407,7 +595,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Campus).filter_by(id=campus_id).first()
             if record:
                 session.delete(record)
@@ -424,11 +612,12 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Building).filter_by(id=building_data["id"]).first()
             fields = [
                 "campus_id", "organization_id", "name", "short_name", "address",
                 "origin_lat", "origin_lng", "origin_bearing", "floor_count",
+                "is_public",
             ]
             if record:
                 for f in fields:
@@ -452,7 +641,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Building).filter_by(id=building_id).first()
             if record:
                 session.delete(record)
@@ -482,7 +671,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
 
             if space_ids:
                 session.query(SpaceConnection).filter(
@@ -522,7 +711,7 @@ class PostGISService:
             return False
 
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             category = _category_for(space_data.get("space_type"))
             ModelClass = _MODEL_BY_CATEGORY[category]
 
@@ -599,7 +788,7 @@ class PostGISService:
             return False
 
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
 
             geom = None
             if floor_data.get("floor_plan_bounds"):
@@ -624,6 +813,8 @@ class PostGISService:
                 record.floor_plan_scale = floor_data.get("floor_plan_scale", 1.0)
                 record.floor_plan_origin_x = floor_data.get("floor_plan_origin_x", 0.0)
                 record.floor_plan_origin_y = floor_data.get("floor_plan_origin_y", 0.0)
+                if "is_public" in floor_data:
+                    record.is_public = bool(floor_data["is_public"])
                 if geom:
                     record.bounds_geometry = geom
                 record.updated_at = datetime.utcnow()
@@ -641,6 +832,7 @@ class PostGISService:
                     floor_plan_origin_x=floor_data.get("floor_plan_origin_x", 0.0),
                     floor_plan_origin_y=floor_data.get("floor_plan_origin_y", 0.0),
                     bounds_geometry=geom,
+                    is_public=bool(floor_data.get("is_public", False)),
                 )
                 session.add(record)
 
@@ -663,7 +855,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(BuildingSpace).filter_by(id=space_id).first()
             if record:
                 session.delete(record)
@@ -680,7 +872,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Floor).filter_by(id=floor_pk).first()
             if record:
                 session.delete(record)
@@ -708,7 +900,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             group_id = door_space_id
             # Remove any pre-existing rows for this group (idempotent re-sync).
             session.query(SpaceConnection).filter_by(connection_group_id=group_id).delete()
@@ -740,7 +932,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             session.query(SpaceConnection).filter_by(connection_group_id=door_space_id).delete()
             session.commit()
             session.close()
@@ -762,7 +954,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             row_id = f"direct:{from_space_id}->{to_space_id}"
             existing = session.query(SpaceConnection).filter_by(id=row_id).first()
             if existing:
@@ -792,7 +984,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             session.query(SpaceConnection).filter(
                 (SpaceConnection.from_space_id == space_id)
                 | (SpaceConnection.to_space_id == space_id)
@@ -812,7 +1004,7 @@ class PostGISService:
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             session.query(SpaceConnection).filter_by(
                 connection_group_id=door_space_id
             ).update({SpaceConnection.is_accessible: is_accessible})
@@ -837,7 +1029,7 @@ class PostGISService:
             return False
 
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(ImportRecord).filter_by(
                 campus_id=campus_id
             ).first()
@@ -869,7 +1061,7 @@ class PostGISService:
             return None
 
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             record = session.query(Floor).filter_by(id=floor_id).first()
             if not record:
                 session.close()
@@ -909,7 +1101,7 @@ class PostGISService:
             return []
 
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             records = session.query(BuildingSpace).filter_by(
                 floor_id=floor_id
             ).all()
@@ -968,7 +1160,7 @@ class PostGISService:
             return []
 
         try:
-            session = self.SessionLocal()
+            session = self._open_session()
             records = session.query(BuildingSpace).filter_by(
                 campus_id=campus_id
             ).all()

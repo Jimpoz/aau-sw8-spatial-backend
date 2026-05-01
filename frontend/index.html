@@ -185,6 +185,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 <body>
 
 <div id="sidebar">
+  <!-- User pill: only rendered after sign-in. In shadow mode it stays hidden. -->
+  <div id="user-pill" class="panel" style="display:none;padding:10px 16px;background:#f8fafc;border-bottom:1px solid #eef2f7">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div id="user-pill-email" style="font-size:13px;font-weight:600;color:#333;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div id="user-pill-org" style="font-size:11px;color:#888;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+      </div>
+      <button id="logout-btn" style="padding:6px 10px;border:1px solid #ddd;background:#fff;border-radius:6px;font-size:12px;cursor:pointer">Sign out</button>
+    </div>
+  </div>
+
   <div class="panel">
     <h3>Map</h3>
     <label for="organization-select">Organization</label>
@@ -199,7 +210,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <button class="btn-secondary btn-half" id="add-building-btn" disabled>+ Building</button>
       <button class="btn-secondary btn-half" id="add-floor-btn" disabled>+ Floor</button>
     </div>
-    <button class="btn-secondary" id="delete-building-btn" disabled style="margin-bottom:10px">Delete Building</button>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <button class="btn-secondary btn-half" id="delete-building-btn" disabled>Delete Building</button>
+      <button class="btn-secondary btn-half" id="delete-floor-btn" disabled>Delete Floor</button>
+    </div>
+    <button class="btn-secondary" id="delete-org-btn" disabled style="margin-bottom:10px;background:#8b1f1f;color:#fff">Delete Organization</button>
     <button class="btn-primary" id="new-map-btn">+ New Map</button>
     <button class="btn-primary" id="export-btn" disabled style="margin-top:6px">Export JSON</button>
   </div>
@@ -454,6 +469,30 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   </div>
 </div>
 
+<!-- Login overlay. Shown when no JWT is present and backend enforcement is on.
+     Hidden when shadow mode is on (legacy X-Api-Key only) so existing authoring
+     flows are unblocked during rollout. -->
+<div id="login-overlay" class="modal-overlay" style="display:none">
+  <div class="modal" style="width:360px">
+    <h2 style="margin-bottom:6px">Sign in</h2>
+    <p style="font-size:12px;color:#888;margin-bottom:18px">
+      Use your map editor account.
+    </p>
+    <label for="login-email">Email</label>
+    <input type="email" id="login-email" autocomplete="username" autofocus>
+    <label for="login-password">Password</label>
+    <input type="password" id="login-password" autocomplete="current-password">
+    <label for="login-org" style="font-size:12px;color:#888">
+      Organization (optional — only needed if you belong to more than one)
+    </label>
+    <input type="text" id="login-org" placeholder="leave empty for default">
+    <div id="login-error" style="font-size:12px;color:#c0392b;min-height:16px;margin:4px 0 8px"></div>
+    <div class="modal-buttons">
+      <button class="btn-primary" id="login-submit">Sign in</button>
+    </div>
+  </div>
+</div>
+
 <div id="notification"></div>
 
 <script>
@@ -461,6 +500,149 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
    Configuration & State
    ═══════════════════════════════════════════════ */
 const API = '/api/v1';
+
+/* ═══════════════════════════════════════════════
+   Auth (Slice 3)
+   ───────────────────────────────────────────────
+   - Token is held in localStorage so authoring sessions survive page reloads.
+   - On boot we probe `/auth/me`; if it succeeds the user is signed in, if it
+     401s the token is bad and we show login, if it 404s the backend is in
+     shadow mode (auth router not mounted) and we let the page run as before.
+   - `authedFetch` attaches `Authorization: Bearer <jwt>` when a token is set.
+   - 401/403 from any other call clears the token and re-shows the login modal.
+   ═══════════════════════════════════════════════ */
+const AUTH_TOKEN_KEY = 'ariadne.mapmaker.jwt';
+const auth = {
+  token: null,
+  user: null,             // { id, email, full_name }
+  organizationId: null,
+  role: null,
+  enforcementOn: false,   // toggled true when /auth/me returns 200 OR 401
+};
+
+function getToken() {
+  return auth.token ?? localStorage.getItem(AUTH_TOKEN_KEY);
+}
+
+function setToken(token) {
+  auth.token = token;
+  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
+  else       localStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
+function authHeaders(extra = {}) {
+  const t = getToken();
+  return t ? { ...extra, 'Authorization': `Bearer ${t}` } : extra;
+}
+
+function showLogin(message) {
+  const overlay = document.getElementById('login-overlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  const err = document.getElementById('login-error');
+  if (err) err.textContent = message ?? '';
+  setTimeout(() => document.getElementById('login-email')?.focus(), 0);
+}
+
+function hideLogin() {
+  const overlay = document.getElementById('login-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function renderUserPill() {
+  const pill = document.getElementById('user-pill');
+  if (!pill) return;
+  if (!auth.user) {
+    pill.style.display = 'none';
+    return;
+  }
+  pill.style.display = 'block';
+  document.getElementById('user-pill-email').textContent = auth.user.email;
+  const orgLabel = auth.organizationId
+    ? `${auth.organizationId}${auth.role ? ' · ' + auth.role : ''}`
+    : 'No active organization';
+  document.getElementById('user-pill-org').textContent = orgLabel;
+}
+
+function applyPrincipal(principal) {
+  auth.user = principal.user ?? { id: principal.id, email: principal.email, full_name: principal.full_name };
+  auth.organizationId = principal.organization_id ?? null;
+  auth.role = principal.role ?? null;
+  renderUserPill();
+}
+
+function clearAuth() {
+  setToken(null);
+  auth.user = null;
+  auth.organizationId = null;
+  auth.role = null;
+  renderUserPill();
+}
+
+/** Probe /auth/me. Returns 'authed' | 'unauthed' | 'shadow' | 'error'. */
+async function probeAuthState() {
+  try {
+    const res = await fetch(API + '/auth/me', { headers: authHeaders() });
+    if (res.status === 404) return 'shadow';      // auth router not mounted
+    if (res.status === 401) return 'unauthed';
+    if (res.ok) {
+      const me = await res.json();
+      applyPrincipal(me);
+      return 'authed';
+    }
+    return 'error';
+  } catch (_) {
+    return 'error';
+  }
+}
+
+async function performLogin(email, password, organizationId) {
+  const body = { email, password };
+  if (organizationId) body.organization_id = organizationId;
+  const res = await fetch(API + '/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || `Login failed (${res.status})`);
+  }
+  const data = await res.json();
+  setToken(data.token);
+  applyPrincipal(data);
+  return data;
+}
+
+function logout() {
+  clearAuth();
+  if (auth.enforcementOn) showLogin();
+}
+
+function wireAuthUI() {
+  document.getElementById('login-submit')?.addEventListener('click', async () => {
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const orgId = document.getElementById('login-org').value.trim() || null;
+    if (!email || !password) {
+      document.getElementById('login-error').textContent = 'Email and password are required.';
+      return;
+    }
+    document.getElementById('login-error').textContent = '';
+    try {
+      await performLogin(email, password, orgId);
+      hideLogin();
+      // Run the rest of init now that we have a token.
+      await loadAfterAuth();
+    } catch (e) {
+      document.getElementById('login-error').textContent = e.message;
+    }
+  });
+  document.getElementById('login-password')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('login-submit').click();
+  });
+  document.getElementById('logout-btn')?.addEventListener('click', logout);
+}
 
 const state = {
   organizations: [],
@@ -550,7 +732,21 @@ const legend = $('legend');
    ═══════════════════════════════════════════════ */
 async function api(path, opts = {}) {
   try {
-    const res = await fetch(API + path, opts);
+    const headers = authHeaders(opts.headers ?? {});
+    const res = await fetch(API + path, { ...opts, headers });
+    if (res.status === 401 || res.status === 403) {
+      // Auth either lapsed or the user lacks permission. Drop the token and
+      // surface the login modal so they can re-authenticate. Skip this for
+      // the /auth/* endpoints themselves to avoid loops.
+      if (!path.startsWith('/auth/')) {
+        if (res.status === 401) clearAuth();
+        if (auth.enforcementOn) showLogin(
+          res.status === 401 ? 'Your session expired. Please sign in again.' : ''
+        );
+      }
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || (res.status === 401 ? 'Sign in required' : 'Forbidden'));
+    }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.detail || `HTTP ${res.status}`);
@@ -1226,6 +1422,8 @@ $('organization-select').addEventListener('change', async function() {
   $('add-building-btn').disabled = true;
   $('add-floor-btn').disabled = true;
   $('delete-building-btn').disabled = true;
+  $('delete-floor-btn').disabled = true;
+  $('delete-org-btn').disabled = !id;
   $('search-input').disabled = true;
   $('export-btn').disabled = true;
   $('chat-input').disabled = true;
@@ -1254,6 +1452,7 @@ $('campus-select').addEventListener('change', async function() {
   $('add-building-btn').disabled = !id;
   $('add-floor-btn').disabled = true;
   $('delete-building-btn').disabled = true;
+  $('delete-floor-btn').disabled = true;
 
   // Enable AI Assistant
   $('chat-input').disabled = !id;
@@ -1293,6 +1492,7 @@ $('building-select').addEventListener('change', async function() {
   fSel.disabled = true;
   $('add-floor-btn').disabled = !id;
   $('delete-building-btn').disabled = !id;
+  $('delete-floor-btn').disabled = true;
   updateMapVisibility();
 
   if (!id) return;
@@ -1319,6 +1519,7 @@ $('floor-select').addEventListener('change', async function() {
   state.selectedFloorId = id || null;
   state.spaces = [];
   state.connections = [];
+  $('delete-floor-btn').disabled = !id;
   updateMapVisibility();
 
   if (!id) return;
@@ -1761,6 +1962,60 @@ $('delete-building-btn').addEventListener('click', async () => {
   } catch (e) { /* handled */ }
   finally {
     $('delete-building-btn').disabled = !state.selectedBuildingId;
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Delete Floor
+   ═══════════════════════════════════════════════ */
+$('delete-floor-btn').addEventListener('click', async () => {
+  const floorId = state.selectedFloorId;
+  if (!floorId) return;
+  const selected = state.floors.find(f => f.id === floorId);
+  const name = selected ? (selected.display_name || floorId) : floorId;
+  if (!window.confirm(
+    `Delete floor "${name}" and every space and connection on it? This cannot be undone.`
+  )) return;
+  try {
+    $('delete-floor-btn').disabled = true;
+    await api(`/floors/${floorId}`, { method: 'DELETE' });
+    notify(`Deleted floor "${name}"`);
+    $('building-select').dispatchEvent(new Event('change'));
+  } catch (e) { /* handled */ }
+  finally {
+    $('delete-floor-btn').disabled = !state.selectedFloorId;
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   Delete Organization
+   ═══════════════════════════════════════════════ */
+$('delete-org-btn').addEventListener('click', async () => {
+  const orgId = state.selectedOrganizationId;
+  if (!orgId) return;
+  const selected = (state.organizations || []).find(o => o.id === orgId);
+  const name = selected ? selected.name : orgId;
+  if (!window.confirm(
+    `Delete organization "${name}" and every campus, building, floor, space, and connection it owns? This cannot be undone.`
+  )) return;
+  const typed = window.prompt(
+    `Type the organization name exactly to confirm deletion:\n\n${name}`
+  );
+  if (typed !== name) {
+    notify('Deletion cancelled — name did not match.', 'error');
+    return;
+  }
+  try {
+    $('delete-org-btn').disabled = true;
+    await api(`/organizations/${orgId}`, { method: 'DELETE' });
+    notify(`Deleted organization "${name}"`);
+    state.selectedOrganizationId = null;
+    await loadOrganizations();
+    $('organization-select').value = '';
+    $('organization-select').dispatchEvent(new Event('change'));
+  } catch (e) { /* handled */ }
+  finally {
+    $('delete-org-btn').disabled = !state.selectedOrganizationId;
   }
 });
 
@@ -2708,6 +2963,22 @@ async function init() {
     if (state.bounds) fitToCanvas();
     render();
   });
+
+  // The mapmaker is an authoring tool that runs against every tenant — there's
+  // no per-user identity for it. nginx already injects X-Api-Key on the
+  // proxied /api path; that combined with no Authorization header puts the
+  // backend into "service mode" (current_is_service=true), which the RLS
+  // policy admits unconditionally so authoring can read/write every org's
+  // rows. We deliberately do NOT probe /auth/me or surface a login modal.
+  wireAuthUI();
+  clearAuth();
+  auth.enforcementOn = false;
+  hideLogin();
+
+  await loadAfterAuth();
+}
+
+async function loadAfterAuth() {
   await loadSpaceTypes();
   await loadOrganizations();
   await loadCampuses();

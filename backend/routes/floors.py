@@ -1,46 +1,61 @@
 from fastapi import APIRouter, HTTPException, Depends
 from db import Database, get_db
-from core.exceptions import FloorNotFound
+from core.auth_principal import Principal, require_org_match, require_role
+from core.exceptions import BuildingNotFound, FloorNotFound
 from models.campus import Floor, FloorCreate
 from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
 from repositories.connection_repo import ConnectionRepository
+from services.audit_service import audit_action
 from services.postgis_service import PostGISService
 
 router = APIRouter(prefix="/floors", tags=["floors"])
 
 
 @router.post("", response_model=Floor, status_code=201)
-def create_floor(data: FloorCreate, db: Database = Depends(get_db)):
-    floor = CampusRepository(db).create_floor(data)
-    building = CampusRepository(db).get_building(floor["building_id"])
-    postgis = PostGISService()
-    postgis.sync_floor({
-        "id": f"{floor['building_id']}_{floor['id']}",
-        "organization_id": building.get("organization_id"),
-        "campus_id": building.get("campus_id"),
-        "building_id": floor["building_id"],
-        "floor_id": floor["id"],
-        "floor_index": floor.get("floor_index"),
-        "display_name": floor.get("display_name"),
-        "floor_plan_url": floor.get("floor_plan_url"),
-        "floor_plan_scale": floor.get("floor_plan_scale"),
-        "floor_plan_origin_x": floor.get("floor_plan_origin_x"),
-        "floor_plan_origin_y": floor.get("floor_plan_origin_y"),
-        "floor_plan_bounds": floor.get("floor_plan_bounds"),
-    })
-    postgis.sync_building({
-        "id": building["id"],
-        "campus_id": building.get("campus_id"),
-        "organization_id": building.get("organization_id"),
-        "name": building.get("name"),
-        "short_name": building.get("short_name"),
-        "address": building.get("address"),
-        "origin_lat": building.get("origin_lat"),
-        "origin_lng": building.get("origin_lng"),
-        "origin_bearing": building.get("origin_bearing"),
-        "floor_count": building.get("floor_count"),
-    })
+def create_floor(
+    data: FloorCreate,
+    db: Database = Depends(get_db),
+    principal: Principal = Depends(require_role("editor")),
+):
+    try:
+        parent = CampusRepository(db).get_building(data.building_id)
+    except BuildingNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    org_id = parent.get("organization_id") if isinstance(parent, dict) else None
+    require_org_match(principal, org_id)
+    with audit_action("create_floor", principal, organization_id=org_id) as detail:
+        detail["building_id"] = data.building_id
+        floor = CampusRepository(db).create_floor(data)
+        detail["floor_id"] = floor["id"]
+        building = CampusRepository(db).get_building(floor["building_id"])
+        postgis = PostGISService()
+        postgis.sync_floor({
+            "id": f"{floor['building_id']}_{floor['id']}",
+            "organization_id": building.get("organization_id"),
+            "campus_id": building.get("campus_id"),
+            "building_id": floor["building_id"],
+            "floor_id": floor["id"],
+            "floor_index": floor.get("floor_index"),
+            "display_name": floor.get("display_name"),
+            "floor_plan_url": floor.get("floor_plan_url"),
+            "floor_plan_scale": floor.get("floor_plan_scale"),
+            "floor_plan_origin_x": floor.get("floor_plan_origin_x"),
+            "floor_plan_origin_y": floor.get("floor_plan_origin_y"),
+            "floor_plan_bounds": floor.get("floor_plan_bounds"),
+        })
+        postgis.sync_building({
+            "id": building["id"],
+            "campus_id": building.get("campus_id"),
+            "organization_id": building.get("organization_id"),
+            "name": building.get("name"),
+            "short_name": building.get("short_name"),
+            "address": building.get("address"),
+            "origin_lat": building.get("origin_lat"),
+            "origin_lng": building.get("origin_lng"),
+            "origin_bearing": building.get("origin_bearing"),
+            "floor_count": building.get("floor_count"),
+        })
     return floor
 
 

@@ -35,8 +35,6 @@ class ImportService:
     def import_map(self, schema: MapImportSchema) -> dict:
         campus = schema.campus
         organization = schema.organization
-
-        # 0. Organization (optional). If provided, both Neo4j and PostGIS get it.
         organization_id = None
         if organization is not None:
             organization_id = organization.id
@@ -56,6 +54,20 @@ class ImportService:
             })
         else:
             organization_id = campus.organization_id
+            if organization_id:
+                try:
+                    existing_org = self.org_repo.get_organization(organization_id)
+                    self.postgis.sync_organization({
+                        "id": existing_org.get("id", organization_id),
+                        "name": existing_org.get("name", organization_id),
+                        "entity_type": existing_org.get("entity_type"),
+                        "description": existing_org.get("description"),
+                    })
+                except Exception as exc:
+                    print(
+                        f"[ImportService] Could not backfill organization "
+                        f"{organization_id} into PostGIS: {exc}"
+                    )
 
         self.postgis.sync_import(
             campus_id=campus.id,
@@ -71,6 +83,7 @@ class ImportService:
                 name=campus.name,
                 description=campus.description,
                 organization_id=organization_id,
+                is_public=bool(campus.is_public),
             )
         )
         self.postgis.sync_campus({
@@ -78,11 +91,13 @@ class ImportService:
             "organization_id": organization_id,
             "name": campus.name,
             "description": campus.description,
+            "is_public": campus.is_public,
         })
 
         # 2. Buildings → Floors → Spaces
         for building in campus.buildings:
             building_org_id = building.organization_id or organization_id
+            building_is_public = bool(building.is_public or campus.is_public)
             self.campus_repo.create_building(
                 BuildingCreate(
                     id=building.id,
@@ -108,8 +123,12 @@ class ImportService:
                 "origin_lng": building.origin_lng,
                 "origin_bearing": building.origin_bearing,
                 "floor_count": building.floor_count,
+                "is_public": building_is_public,
             })
             for floor in building.floors:
+                floor_is_public = (
+                    bool(floor.is_public) if floor.is_public is not None else building_is_public
+                )
                 self.campus_repo.create_floor(
                     FloorCreate(
                         id=floor.id,
@@ -137,6 +156,7 @@ class ImportService:
                     "floor_plan_origin_x": floor.floor_plan_origin_x,
                     "floor_plan_origin_y": floor.floor_plan_origin_y,
                     "floor_plan_bounds": floor.floor_plan_bounds,
+                    "is_public": floor_is_public,
                 })
 
                 for space in floor.spaces:

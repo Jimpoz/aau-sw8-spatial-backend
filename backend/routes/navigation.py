@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from db import Database, get_db
+from core.auth_principal import require_role
 from core.exceptions import NavigationError, SpaceNotFound
 from models.navigation import Route
 from services.navigation_service import NavigationService
@@ -23,8 +24,11 @@ def navigate(
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.post("/refresh-graph")
+@router.post("/refresh-graph", dependencies=[Depends(require_role("editor"))])
 def refresh_graph(db: Database = Depends(get_db)):
-    """Rebuild the GDS navigation graph projection (call after bulk imports)."""
+    """Rebuild the GDS navigation graph projection (call after bulk imports).
+    The GDS projection is global (single graph for the whole instance) so we
+    require an authenticated editor but no org-match: any editor in any org
+    can rebuild it."""
     ok = GdsService(db).refresh_projection()
     return {"success": ok, "message": "GDS projection refreshed" if ok else "GDS not available"}

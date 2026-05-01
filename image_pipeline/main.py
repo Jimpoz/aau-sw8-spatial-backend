@@ -5,7 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 
 from db import close_neo4j, get_neo4j_driver
 from room_summary.RoomImageInput import RoomImageInput
@@ -14,6 +14,30 @@ from room_summary.RoomSummaryService import RoomSummaryService
 ROOM_SUMMARY_DIR = Path(__file__).resolve().parent / "room_summary"
 PREFIX = "/api/v1"
 CLOCKWISE_DIRECTIONS = ("north", "east", "south", "west")
+
+
+def _require_org_uploader(
+    x_user_id: str | None,
+    x_org_id: str | None,
+    x_user_role: str | None,
+) -> tuple[str, str]:
+    """Reject anonymous, guest, and unaffiliated callers from upload routes."""
+    if not x_user_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required to upload room photos.",
+        )
+    if x_user_id.startswith("guest_") or (x_user_role or "").lower() == "guest":
+        raise HTTPException(
+            status_code=403,
+            detail="Guest accounts cannot upload room photos.",
+        )
+    if not x_org_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only members of an organization can upload room photos.",
+        )
+    return x_user_id, x_org_id
 
 
 def _default_model_config_path() -> Path:
@@ -169,6 +193,8 @@ async def _run_room_object_detection_setup(
     confidence_threshold: float | None,
     stored_image_count: int | None,
     stored_views: list[str] | None,
+    uploaded_by_user_id: str,
+    uploaded_by_org_id: str,
 ) -> dict[str, object]:
     try:
         decoded_images = await _decode_upload_images(images)
@@ -181,6 +207,8 @@ async def _run_room_object_detection_setup(
             conn=get_neo4j_driver(),
             stored_image_count=stored_image_count,
             stored_views=stored_views,
+            uploaded_by_user_id=uploaded_by_user_id,
+            uploaded_by_org_id=uploaded_by_org_id,
         ).to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -274,7 +302,11 @@ def nearest_rooms(
 async def compare_two_images(
     image_a: UploadFile = File(..., description="First image."),
     image_b: UploadFile = File(..., description="Second image."),
+    x_user_id: str | None = Header(default=None),
+    x_org_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
 ) -> dict[str, object]:
+    _require_org_uploader(x_user_id, x_org_id, x_user_role)
     images = [image_a, image_b]
     try:
         frames: list[np.ndarray] = []
@@ -315,7 +347,11 @@ async def summarize_room(
         le=1.0,
         description="Optional YOLO confidence threshold override for this request.",
     ),
+    x_user_id: str | None = Header(default=None),
+    x_org_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
 ) -> dict[str, object]:
+    _require_org_uploader(x_user_id, x_org_id, x_user_role)
     return await _run_room_summary(
         images=_ordered_upload_images(north_image, east_image, south_image, west_image),
         model_name=model_name,
@@ -343,7 +379,11 @@ async def summarize_named_room(
         le=1.0,
         description="Optional YOLO confidence threshold override for this request.",
     ),
+    x_user_id: str | None = Header(default=None),
+    x_org_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
 ) -> dict[str, object]:
+    _require_org_uploader(x_user_id, x_org_id, x_user_role)
     return await _run_named_room_summary(
         room_name=room_name,
         images=_ordered_upload_images(north_image, east_image, south_image, west_image),
@@ -393,7 +433,11 @@ async def setup_room_object_detection(
             "stored_image_count must be omitted or match the number of selected views."
         ),
     ),
+    x_user_id: str | None = Header(default=None),
+    x_org_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
 ) -> dict[str, object]:
+    user_id, org_id = _require_org_uploader(x_user_id, x_org_id, x_user_role)
     return await _run_room_object_detection_setup(
         room_name=room_name,
         images=_ordered_upload_images(north_image, east_image, south_image, west_image),
@@ -401,4 +445,6 @@ async def setup_room_object_detection(
         confidence_threshold=confidence_threshold,
         stored_image_count=stored_image_count,
         stored_views=stored_views,
+        uploaded_by_user_id=user_id,
+        uploaded_by_org_id=org_id,
     )

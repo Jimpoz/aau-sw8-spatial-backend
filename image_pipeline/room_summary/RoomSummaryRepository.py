@@ -55,6 +55,8 @@ class RoomSummaryRepository:
         room_embedding: list[float] | None = None,
         view_embeddings: dict[str, list[float]] | None = None,
         embedding_model: str | None = None,
+        uploaded_by_user_id: str | None = None,
+        uploaded_by_org_id: str | None = None,
     ) -> str:
         rows = self._query_runner.run(
             """
@@ -94,6 +96,8 @@ class RoomSummaryRepository:
             "stored_views": stored_views,
             "views": room_summary,
             "updated_at": updated_at,
+            "uploaded_by_user_id": uploaded_by_user_id,
+            "uploaded_by_org_id": uploaded_by_org_id,
         }
         if room_embedding is not None or view_embeddings:
             metadata["room_summary"]["image_embeddings"] = {
@@ -126,6 +130,8 @@ class RoomSummaryRepository:
                 space.room_summary_updated_at = $room_summary_updated_at,
                 space.room_embedding = $room_embedding,
                 space.room_embedding_model = $room_embedding_model,
+                space.uploaded_by_user_id = $uploaded_by_user_id,
+                space.uploaded_by_org_id = $uploaded_by_org_id,
                 space.metadata = $metadata
             RETURN coalesce(space.display_name, space.short_name, toString(space.id)) AS room_name
             """,
@@ -138,6 +144,8 @@ class RoomSummaryRepository:
             room_summary_updated_at=updated_at,
             room_embedding=room_embedding,
             room_embedding_model=embedding_model,
+            uploaded_by_user_id=uploaded_by_user_id,
+            uploaded_by_org_id=uploaded_by_org_id,
             metadata=json.dumps(metadata, separators=(",", ":"), sort_keys=True),
         )
 

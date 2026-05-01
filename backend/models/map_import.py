@@ -61,7 +61,8 @@ class FloorImport(BaseModel):
     floor_plan_origin_x: Optional[float] = Field(default=0.0)
     floor_plan_origin_y: Optional[float] = Field(default=0.0)
     spaces: list[SpaceImport] = []
-    floor_plan_bounds: Optional[list[list[float]]] = None 
+    floor_plan_bounds: Optional[list[list[float]]] = None
+    is_public: Optional[bool] = None
 
 
 class BuildingImport(BaseModel):
@@ -76,6 +77,7 @@ class BuildingImport(BaseModel):
     floor_count: Optional[int] = None
     floors: list[FloorImport] = []
     building_bounds: Optional[list[list[float]]] = None
+    is_public: bool = False
 
 
 class ConnectionNodeImport(BaseModel):
@@ -113,6 +115,7 @@ class CampusImport(BaseModel):
     buildings: list[BuildingImport] = []
     outdoor_spaces: list[SpaceImport] = []
     connections: list[ConnectionNodeImport] = []
+    is_public: bool = False
 
 
 class MapImportSchema(BaseModel):

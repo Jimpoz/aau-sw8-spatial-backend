@@ -1,8 +1,13 @@
 # Image Pipeline
 
-This module exposes the room-summary API used to analyze four room photos, count detected objects, generate SVG-based summaries, and optionally persist the result back into Neo4j.
+This module exposes the room-summary API used to analyze four room photos, count detected objects with YOLO, generate SVG-based summaries, persist results into Neo4j, and compare rooms by visual similarity using CLIP image embeddings.
 
-The service runs on port `8002` in the project compose setup.
+The service runs on port `8002` in the project compose setup. Reached publicly through the gateway at `/api/v1/room-summary/*`.
+
+## Two pipelines, one service
+
+- **YOLO room summaries** ([room_summary/RoomObjectDetector.py](./room_summary/RoomObjectDetector.py)) — counts a known set of object classes (chair, desk, bottle, …) per view, aggregates across the four compass photos, and stores `room_objects` + `room_object_counts_json` on the matching `Space` node.
+- **CLIP image similarity** ([room_summary/RoomImageEmbedder.py](./room_summary/RoomImageEmbedder.py)) — uses `open_clip` (ViT-B-32, `laion2b_s34b_b79k`, 512-d) to embed each stored room photo, mean-pool per-room, and persist `embedding_per_image` + `embedding_pooled` on the `Space`. Cosine similarity drives the `/similarity*` endpoints (room-vs-room comparisons, nearest-neighbour lookup, ad-hoc image-vs-image).
 
 ## What This Service Exposes
 
@@ -42,6 +47,51 @@ Example request:
 
 ```bash
 curl http://localhost:8002/api/v1/room-summary/rooms
+```
+
+### `GET /api/v1/room-summary/similarity`
+
+Cosine similarity between the stored CLIP embeddings of two named rooms.
+
+Query parameters:
+
+- `room_a` (required) — first room name
+- `room_b` (required) — second room name
+- `mode` — `room` (default, pooled embedding cosine) or `max_view` (best per-view pair across all view×view combinations)
+
+Errors: `404` if either room has no stored embedding, `400` for an invalid mode.
+
+```bash
+curl "http://localhost:8002/api/v1/room-summary/similarity?room_a=A101&room_b=A102&mode=room"
+```
+
+### `GET /api/v1/room-summary/similarity/nearest`
+
+Top-k nearest rooms to an anchor room by pooled-embedding cosine similarity.
+
+Query parameters:
+
+- `room` (required) — anchor room name
+- `top_k` — `1..100`, default `5`
+- `include_self` — include the anchor in the result list, default `false`
+
+```bash
+curl "http://localhost:8002/api/v1/room-summary/similarity/nearest?room=A101&top_k=10"
+```
+
+### `POST /api/v1/room-summary/similarity/ad-hoc`
+
+Cosine similarity between two arbitrary uploaded images. Doesn't read or write Neo4j — useful as a sanity check or for client-side experiments.
+
+Required upload fields:
+
+- `image_a`
+- `image_b`
+
+```bash
+curl -X POST "http://localhost:8002/api/v1/room-summary/similarity/ad-hoc" \
+  -F "image_a=@a.jpg" \
+  -F "image_b=@b.jpg"
 ```
 
 ### `POST /api/v1/room-summary`
@@ -226,9 +276,12 @@ What gets stored on the `Space` node:
 
 - `room_objects`
 - `room_object_counts_json`
-- `room_images`
+- `room_images` — embedded base64 SVGs of the stored views
 - `room_summary_updated_at`
 - `metadata.room_summary`
+- `embedding_per_image` — list of CLIP vectors, one per stored view
+- `embedding_pooled` — single mean-pooled CLIP vector for the room (used by `/similarity` and `/similarity/nearest`)
+- `embedding_model` — model id, e.g. `open_clip/ViT-B-32/laion2b_s34b_b79k`
 
 Image storage behavior:
 
@@ -280,10 +333,12 @@ These are the core parts behind the exposed services:
   Main orchestration layer for detection, vectorization, aggregation, and persistence.
 - [room_summary/RoomObjectDetector.py](./room_summary/RoomObjectDetector.py)
   Loads the YOLO model and produces per-image object counts.
+- [room_summary/RoomImageEmbedder.py](./room_summary/RoomImageEmbedder.py)
+  Loads `open_clip` ViT-B-32 lazily, embeds each room view, mean-pools per-room. Used for both setup-time persistence and lookup-time similarity.
 - [room_summary/RoomVectorizer.py](./room_summary/RoomVectorizer.py)
   Converts frames into compact SVG summaries and can also wrap the original frame into SVG.
 - [room_summary/RoomSummaryRepository.py](./room_summary/RoomSummaryRepository.py)
-  Neo4j lookup and persistence logic for room-summary metadata.
+  Neo4j lookup and persistence logic for room-summary metadata, including embeddings.
 - [db.py](./db.py)
   Shared Neo4j driver setup and teardown.
 

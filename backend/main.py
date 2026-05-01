@@ -4,8 +4,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core.exceptions import NotFoundError, NavigationError, MapImportError
+from core.request_context import (
+    current_is_service,
+    current_org_id,
+    current_user_id,
+    current_user_role,
+)
 from db import get_db
 from models.enums import SpaceType, CONN_SPACE_TYPES
+from core.config import settings
 from routes import (
     organizations,
     campuses,
@@ -15,14 +22,30 @@ from routes import (
     connections,
     navigation,
     search,
+    auth,
 )
 from scripts.init_db import apply_schema
+from services.postgis_service import PostGISService
+
+
+def _check_jwt_secret_strength() -> None:
+    secret = settings.auth_jwt_secret
+    if not secret:
+        return
+    if len(secret) < 32:
+        raise RuntimeError(
+            "AUTH_JWT_SECRET must be at least 32 characters. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _check_jwt_secret_strength()
     db = get_db()
     apply_schema(db)
+    if settings.auth_rls_enabled:
+        PostGISService().apply_rls_policies()
     yield
     db.close()
 
@@ -32,6 +55,25 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+@app.middleware("http")
+async def _populate_request_context(request: Request, call_next):
+    user_id = request.headers.get("x-user-id")
+    org_id = request.headers.get("x-org-id")
+    role = request.headers.get("x-user-role")
+
+    user_token = current_user_id.set(user_id)
+    org_token = current_org_id.set(org_id)
+    role_token = current_user_role.set(role)
+    service_token = current_is_service.set(user_id is None)
+    try:
+        return await call_next(request)
+    finally:
+        current_user_id.reset(user_token)
+        current_org_id.reset(org_token)
+        current_user_role.reset(role_token)
+        current_is_service.reset(service_token)
+
 
 # --- Exception handlers ---
 
@@ -62,6 +104,9 @@ app.include_router(spaces.router, prefix=PREFIX)
 app.include_router(connections.router, prefix=PREFIX)
 app.include_router(navigation.router, prefix=PREFIX)
 app.include_router(search.router, prefix=PREFIX)
+
+if settings.auth_jwt_secret:
+    app.include_router(auth.router, prefix=PREFIX)
 
 
 @app.get(f"{PREFIX}/enums/space-types")

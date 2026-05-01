@@ -3,6 +3,7 @@ import os
 from typing import Any
 
 import httpx
+import jwt
 import websockets
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -12,6 +13,9 @@ ASSISTANT_URL = os.getenv("ASSISTANT_URL", "http://assistant:8001")
 IMAGE_PIPELINE_URL = os.getenv("IMAGE_PIPELINE_URL", "http://image_pipeline:8002")
 ML_VISION_URL = os.getenv("ML_VISION_URL", "http://ml_vision:8000")
 API_SECRET = os.getenv("API_SECRET", "")
+AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")
+AUTH_JWT_ISSUER = os.getenv("AUTH_JWT_ISSUER", "ariadne-backend")
+_IDENTITY_HEADERS = ("x-user-id", "x-org-id", "x-user-role")
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -94,6 +98,45 @@ async def _probe_url(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
         return {"ok": False, "status_code": None, "error": str(exc)}
 
 
+def _decode_identity(authorization: str | None) -> dict | None:
+    """Verify a bearer JWT against AUTH_JWT_SECRET and return the claims, or
+    None if no token is present / verification fails. Failures are silent in
+    Slice 1 — the request still goes through, just without identity headers.
+    A future slice will start failing closed for protected endpoints."""
+    if not AUTH_JWT_SECRET or not authorization:
+        return None
+    if not authorization.lower().startswith("bearer "):
+        return None
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        return jwt.decode(
+            token,
+            AUTH_JWT_SECRET,
+            algorithms=["HS256"],
+            issuer=AUTH_JWT_ISSUER,
+            options={"require": ["exp", "sub"]},
+        )
+    except jwt.InvalidTokenError:
+        return None
+
+
+def _apply_identity_headers(headers: dict[str, str], claims: dict | None) -> None:
+    """Strip any caller-supplied identity headers (anti-spoofing) and, when a
+    JWT was successfully decoded, stamp the trusted values from the claims.
+    Mutates `headers` in place."""
+    for h in _IDENTITY_HEADERS:
+        headers.pop(h, None)
+        headers.pop(h.title(), None)
+    if not claims:
+        return
+    if claims.get("sub"):
+        headers["x-user-id"] = str(claims["sub"])
+    if claims.get("org_id"):
+        headers["x-org-id"] = str(claims["org_id"])
+    if claims.get("role"):
+        headers["x-user-role"] = str(claims["role"])
+
+
 async def _proxy(request: Request, target_base: str, upstream_name: str) -> Response:
     path = request.url.path
     query = str(request.url.query)
@@ -104,6 +147,9 @@ async def _proxy(request: Request, target_base: str, upstream_name: str) -> Resp
     body = await request.body()
     headers = dict(request.headers)
     headers.pop("host", None)
+    _apply_identity_headers(
+        headers, _decode_identity(request.headers.get("authorization")),
+    )
 
     try:
         async with httpx.AsyncClient(timeout=900.0) as client:
@@ -297,6 +343,9 @@ async def proxy_ml_vision(request: Request, path: str):
     body = await request.body()
     headers = dict(request.headers)
     headers.pop("host", None)
+    _apply_identity_headers(
+        headers, _decode_identity(request.headers.get("authorization")),
+    )
 
     try:
         async with httpx.AsyncClient(timeout=900.0) as client:

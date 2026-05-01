@@ -163,6 +163,8 @@ class RoomSummaryService:
         expected_views: int = 4,
         stored_image_count: int | None = None,
         stored_views: Sequence[str] | None = None,
+        uploaded_by_user_id: str | None = None,
+        uploaded_by_org_id: str | None = None,
     ) -> RoomObjectDetectionSetupResult:
         normalized_room_name = room_name.strip()
         if not normalized_room_name:
@@ -205,6 +207,8 @@ class RoomSummaryService:
             room_embedding=result.room_embedding,
             view_embeddings=view_embeddings,
             embedding_model=result.embedding_model,
+            uploaded_by_user_id=uploaded_by_user_id,
+            uploaded_by_org_id=uploaded_by_org_id,
         )
         return RoomObjectDetectionSetupResult(
             room_name=stored_room_name,

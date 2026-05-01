@@ -102,6 +102,7 @@ class CampusRepository:
             "name": data.name,
             "description": data.description,
             "organization_id": data.organization_id,
+            "is_public": bool(data.is_public),
             "now": now,
         }
         if data.organization_id:
@@ -112,6 +113,7 @@ class CampusRepository:
                 SET c.name = $name,
                     c.description = $description,
                     c.organization_id = $organization_id,
+                    c.is_public = $is_public,
                     c.created_at = coalesce(c.created_at, $now),
                     c.updated_at = $now
                 MERGE (o)-[:HAS_CAMPUS]->(c)
@@ -126,6 +128,7 @@ class CampusRepository:
                 SET c.name = $name,
                     c.description = $description,
                     c.organization_id = $organization_id,
+                    c.is_public = $is_public,
                     c.created_at = coalesce(c.created_at, $now),
                     c.updated_at = $now
                 RETURN c
@@ -133,6 +136,23 @@ class CampusRepository:
                 params,
             )
         return result[0]["c"]
+
+    def list_visible_campuses(self, org_id: str | None) -> list[dict]:
+        result = self.db.execute(
+            """
+            MATCH (c:Campus)
+            WHERE coalesce(c.is_public, false) = true
+               OR ($org_id IS NOT NULL AND c.organization_id = $org_id)
+            OPTIONAL MATCH (org:Organization {id: c.organization_id})
+            RETURN c, org.name AS organization_name
+            ORDER BY coalesce(org.name, ''), c.name
+            """,
+            {"org_id": org_id},
+        )
+        return [
+            {**row["c"], "organization_name": row["organization_name"]}
+            for row in result
+        ]
 
     def get_campus(self, campus_id: str) -> dict:
         result = self.db.execute(
@@ -221,6 +241,33 @@ class CampusRepository:
             {"campus_id": campus_id},
         )
         return [r["b"] for r in result]
+
+    def list_visible_buildings(self, org_id: str | None) -> list[dict]:
+        result = self.db.execute(
+            """
+            MATCH (c:Campus)-[:HAS_BUILDING]->(b:Building)
+            WHERE coalesce(c.is_public, false) = true
+               OR ($org_id IS NOT NULL AND c.organization_id = $org_id)
+            WITH c, b
+            WHERE b.origin_lat IS NOT NULL AND b.origin_lng IS NOT NULL
+            OPTIONAL MATCH (org:Organization {id: c.organization_id})
+            RETURN
+              b.id AS id,
+              b.name AS name,
+              b.short_name AS short_name,
+              b.address AS address,
+              b.origin_lat AS origin_lat,
+              b.origin_lng AS origin_lng,
+              c.id AS campus_id,
+              c.name AS campus_name,
+              c.organization_id AS organization_id,
+              org.name AS organization_name,
+              coalesce(c.is_public, false) AS is_public
+            ORDER BY coalesce(org.name, ''), c.name, b.name
+            """,
+            {"org_id": org_id},
+        )
+        return result
 
     def delete_building(self, building_id: str) -> dict:
         """Delete a building and everything inside it — floors, spaces (incl.

@@ -12,6 +12,8 @@ services:
       - ML_VISION_URL=${ML_VISION_URL:-http://ml_vision:8000}
       - MIDDLEWARE_DEBUG_UPSTREAMS=${MIDDLEWARE_DEBUG_UPSTREAMS:-false}
       - API_SECRET=${API_SECRET}
+      - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-}
+      - AUTH_JWT_ISSUER=${AUTH_JWT_ISSUER:-ariadne-backend}
     depends_on:
       - backend
       - assistant
@@ -32,11 +34,20 @@ services:
       - SUPABASE_DB_URL=${SUPABASE_DB_URL}
       - SUPABASE_DB_PASSWORD=${SUPABASE_DB_PASSWORD}
       - SUPABASE_ENABLE_SYNC=${SUPABASE_ENABLE_SYNC:-false}
+      - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-}
+      - AUTH_JWT_ISSUER=${AUTH_JWT_ISSUER:-ariadne-backend}
+      - AUTH_JWT_TTL_SECONDS=${AUTH_JWT_TTL_SECONDS:-43200}
+      - AUTH_RLS_ENABLED=${AUTH_RLS_ENABLED:-false}
+      - AUTH_LOGIN_RATE_LIMIT=${AUTH_LOGIN_RATE_LIMIT:-10}
+      - AUTH_MFA_CHALLENGE_TTL_SECONDS=${AUTH_MFA_CHALLENGE_TTL_SECONDS:-300}
+      - EMAIL_SERVICE_URL=${EMAIL_SERVICE_URL:-http://email:8003}
+      - INTERNAL_EMAIL_TOKEN=${INTERNAL_EMAIL_TOKEN:-}
     volumes:
       - ./backend:/app
       - ./shared:/app/shared
     depends_on:
       - assistant
+      - email
 
   assistant:
     build:
@@ -80,6 +91,28 @@ services:
       - NEO4J_URI=${NEO4J_URI}
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+
+  email:
+    build:
+      context: ./email-service
+      dockerfile: Dockerfile
+    expose:
+      - "8003"
+    environment:
+      - INTERNAL_EMAIL_TOKEN=${INTERNAL_EMAIL_TOKEN}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - SMTP_USE_SSL=${SMTP_USE_SSL:-}
+      - SMTP_FROM_ADDRESS=${SMTP_FROM_ADDRESS:-no-reply@ariadne.local}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-Ariadne}
+      - MAILBOX_DIR=${MAILBOX_DIR:-}
+    volumes:
+      # Dummy-mode mailbox: captured .eml files land here. Created on
+      # demand; safe to leave mounted whether or not MAILBOX_DIR is set.
+      - ./email-mailbox:/mailbox
 
   frontend:
     build:
