@@ -247,7 +247,12 @@ class AssistantService:
 
         return extreme, None
 
-    async def chat(self, user_query: str, campus_id: str) -> Dict[str, Any]:
+    async def chat(
+        self,
+        user_query: str,
+        campus_id: str,
+        building_id: str | None = None,
+    ) -> Dict[str, Any]:
         t0 = time.perf_counter()
 
         # Determine if user requested a global map question
@@ -286,7 +291,9 @@ class AssistantService:
         floor_idx = self._floor_intent(user_query)
 
         if floor_idx is not None:
-            spaces = self.repo.search_spaces_on_floor(campus_id, floor_idx, limit=20)
+            spaces = self.repo.search_spaces_on_floor(
+                campus_id, floor_idx, limit=20, building_id=building_id,
+            )
             if spaces:
                 floor_label = spaces[0].get("floor_name") or f"floor {floor_idx}"
                 building_label = spaces[0].get("building_name", "the building")
@@ -301,7 +308,9 @@ class AssistantService:
             similar_spaces = spaces
         else:
             query_vector = await self._encode_query(user_query)
-            similar_spaces = self.repo.search_similar_spaces(campus_id, query_vector, limit=10)
+            similar_spaces = self.repo.search_similar_spaces(
+                campus_id, query_vector, limit=10, building_id=building_id,
+            )
 
             context_lines = []
             for s in similar_spaces:

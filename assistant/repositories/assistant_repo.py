@@ -10,21 +10,25 @@ class AssistantRepository:
         campus_id: str,
         query_vector: list[float],
         limit: int = 10,
+        building_id: str | None = None,
     ) -> list[dict]:
         """
         Performs a vector search to find the most contextually relevant spaces,
         and then traverses the graph to find their physical location and connected neighbors.
-        Also helping in understanding how they are connected to each other and the physical context of the building.
+        When ``building_id`` is provided, retrieval is restricted to spaces in
+        that building so the LLM only sees rooms the user can actually walk to
+        from where they are right now.
         """
 
         cypher_query = """
-        // Semanti Search
+        // Semantic Search
         CALL db.index.vector.queryNodes('space_embedding_idx', $limit, $query_vector)
         YIELD node AS space, score
         WHERE space.campus_id = $campus_id AND space.is_navigable = true
 
         // Vertical Context
         MATCH (building:Building)-[:HAS_FLOOR]->(floor:Floor)-[:HAS_SPACE]->(space)
+        WHERE $building_id IS NULL OR building.id = $building_id
 
         // Horizontal Context
         // We use OPTIONAL MATCH so the query doesn't fail if a room has no connections yet
@@ -45,7 +49,12 @@ class AssistantRepository:
 
         records = self.db.execute(
             cypher_query,
-            {"campus_id": campus_id, "query_vector": query_vector, "limit": limit}
+            {
+                "campus_id": campus_id,
+                "query_vector": query_vector,
+                "limit": limit,
+                "building_id": building_id,
+            },
         )
 
         results = []
@@ -268,6 +277,7 @@ class AssistantRepository:
         campus_id: str,
         floor_index: int,
         limit: int = 20,
+        building_id: str | None = None,
     ) -> list[dict]:
         """Return all navigable spaces on a specific floor, with their building/floor context."""
         cypher_query = """
@@ -275,6 +285,7 @@ class AssistantRepository:
         WHERE space.campus_id = $campus_id
           AND floor.floor_index = $floor_index
           AND space.is_navigable = true
+          AND ($building_id IS NULL OR building.id = $building_id)
         OPTIONAL MATCH (space)-[r:CONNECTS_TO]-(neighbor:Space)
         RETURN
             space.display_name AS name,
@@ -291,7 +302,12 @@ class AssistantRepository:
         """
         records = self.db.execute(
             cypher_query,
-            {"campus_id": campus_id, "floor_index": floor_index, "limit": limit},
+            {
+                "campus_id": campus_id,
+                "floor_index": floor_index,
+                "limit": limit,
+                "building_id": building_id,
+            },
         )
         results = []
         for record in records:
