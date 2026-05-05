@@ -946,7 +946,7 @@ function render() {
   // Draw spaces
   for (const space of state.spaces) {
     const isConnType = space.space_type && (
-      space.space_type.startsWith('DOOR_') || space.space_type === 'PASSAGE' || space.space_type === 'OPEN'
+      space.space_type.startsWith('DOOR_') || space.space_type === 'PASSAGE'
     );
 
     if (!space.polygon || space.polygon.length < 3) {
