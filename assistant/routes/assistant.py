@@ -8,5 +8,9 @@ router = APIRouter(prefix="/assistant", tags=["assistant"])
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, db: Database = Depends(get_db)):
     service = AssistantService(db)
-    result = await service.chat(request.user_query, request.campus_id)
+    result = await service.chat(
+        request.user_query,
+        request.campus_id,
+        building_id=request.building_id,
+    )
     return result

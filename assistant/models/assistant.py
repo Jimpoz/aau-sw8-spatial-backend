@@ -4,6 +4,9 @@ from pydantic import BaseModel
 class ChatRequest(BaseModel):
     user_query: str
     campus_id: str
+    building_id: str | None = None
+    user_lat: float | None = None
+    user_lon: float | None = None
 
 class ChatResponse(BaseModel):
     answer: str
