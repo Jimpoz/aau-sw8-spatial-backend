@@ -2,6 +2,8 @@ FROM nginx:alpine
 
 COPY nginx.conf.template /nginx.conf.template
 COPY index.html /usr/share/nginx/html/index.html
+COPY css/ /usr/share/nginx/html/css/
+COPY js/ /usr/share/nginx/html/js/
 
 EXPOSE 80
 
