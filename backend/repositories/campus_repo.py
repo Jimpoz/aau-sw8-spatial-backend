@@ -384,3 +384,70 @@ class CampusRepository:
             {"building_id": building_id},
         )
         return [r["f"] for r in result]
+
+    def delete_floor(self, floor_id: str) -> dict:
+        exists = self.db.execute(
+            """
+            MATCH (b:Building)-[:HAS_FLOOR]->(f:Floor {id: $id})
+            RETURN b.id AS building_id
+            """,
+            {"id": floor_id},
+        )
+        if not exists:
+            raise FloorNotFound(floor_id)
+        building_id = exists[0]["building_id"]
+
+        conn_types = [t.value for t in CONN_SPACE_TYPES]
+
+        space_rows = self.db.execute(
+            """
+            MATCH (:Floor {id: $id})-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            RETURN collect(DISTINCT s.id) AS roots, collect(DISTINCT sub.id) AS subs
+            """,
+            {"id": floor_id},
+        )
+        space_ids: set[str] = set()
+        if space_rows:
+            space_ids.update(sid for sid in space_rows[0]["roots"] if sid)
+            space_ids.update(sid for sid in space_rows[0]["subs"] if sid)
+
+        door_ids: set[str] = set()
+        if space_ids:
+            door_rows = self.db.execute(
+                """
+                MATCH (s:Space)-[:CONNECTS_TO]-(d:Space)
+                WHERE s.id IN $space_ids AND d.space_type IN $conn_types
+                RETURN DISTINCT d.id AS id
+                """,
+                {"space_ids": list(space_ids), "conn_types": conn_types},
+            )
+            door_ids.update(r["id"] for r in door_rows)
+
+        self.db.execute_write(
+            """
+            MATCH (f:Floor {id: $id})
+            OPTIONAL MATCH (f)-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            OPTIONAL MATCH (d:Space)
+              WHERE d.id IN $door_ids
+            DETACH DELETE d, sub, s, f
+            """,
+            {"id": floor_id, "door_ids": list(door_ids)},
+        )
+
+        self.db.execute_write(
+            """
+            MATCH (b:Building {id: $building_id})
+            OPTIONAL MATCH (b)-[:HAS_FLOOR]->(f:Floor)
+            WITH b, count(DISTINCT f) AS floor_count
+            SET b.floor_count = floor_count
+            """,
+            {"building_id": building_id},
+        )
+
+        return {
+            "floor_id": floor_id,
+            "building_id": building_id,
+            "space_ids": sorted(space_ids | door_ids),
+        }

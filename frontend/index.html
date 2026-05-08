@@ -214,6 +214,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <button class="btn-secondary btn-half" id="delete-building-btn" disabled>Delete Building</button>
       <button class="btn-secondary btn-half" id="delete-floor-btn" disabled>Delete Floor</button>
     </div>
+    <button class="btn-secondary btn-half" id="delete-campus-btn" disabled style="margin-bottom:10px;background:#8b1f1f;color:#fff">Delete Campus</button>
     <button class="btn-secondary" id="delete-org-btn" disabled style="margin-bottom:10px;background:#8b1f1f;color:#fff">Delete Organization</button>
     <button class="btn-primary" id="new-map-btn">+ New Map</button>
     <button class="btn-primary" id="export-btn" disabled style="margin-top:6px">Export JSON</button>
@@ -341,6 +342,46 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <h3>Import Map</h3>
     <input type="file" id="import-file" accept=".json">
     <button class="btn-primary" id="import-btn" disabled>Import</button>
+  </div>
+
+  <div class="panel">
+    <h3>Import DWG / DXF</h3>
+    <p class="tool-hint">
+      Upload a CAD floor plan. Closed polylines become rooms; layer names
+      are heuristically classified (OFFICE, CORRIDOR, REST, …). DWG is
+      transcoded server-side via ODA File Converter — if it isn't installed
+      on the backend, convert your file to DXF locally first.
+    </p>
+    <input type="file" id="dxf-file" accept=".dxf,.dwg">
+    <label for="dxf-campus-id">Campus ID</label>
+    <input type="text" id="dxf-campus-id" placeholder="e.g. campus_aau_cph">
+    <label for="dxf-campus-name">Campus name</label>
+    <input type="text" id="dxf-campus-name" placeholder="e.g. AAU Copenhagen">
+    <label for="dxf-building-id">Building ID</label>
+    <input type="text" id="dxf-building-id" placeholder="e.g. bldg_acm15">
+    <label for="dxf-building-name">Building name</label>
+    <input type="text" id="dxf-building-name" placeholder="e.g. A. C. Meyers Vænge 15">
+    <label for="dxf-floor-id">Floor ID</label>
+    <input type="text" id="dxf-floor-id" placeholder="e.g. floor_acm15_g">
+    <label for="dxf-floor-index">Floor index</label>
+    <input type="number" id="dxf-floor-index" value="0">
+    <label for="dxf-floor-name">Floor display name</label>
+    <input type="text" id="dxf-floor-name" value="Ground">
+    <label for="dxf-org-id">Organization ID (optional)</label>
+    <input type="text" id="dxf-org-id" placeholder="e.g. org_aau">
+    <label for="dxf-origin-lat">Origin latitude (optional)</label>
+    <input type="number" id="dxf-origin-lat" step="any" placeholder="e.g. 55.65066">
+    <label for="dxf-origin-lng">Origin longitude (optional)</label>
+    <input type="number" id="dxf-origin-lng" step="any" placeholder="e.g. 12.54128">
+    <label for="dxf-layer-mapping">Layer mapping (optional, JSON)</label>
+    <textarea id="dxf-layer-mapping" rows="3" placeholder='e.g. {"WALLS_OFC_01":"ROOM_OFFICE","WALLS_HALL_01":"CORRIDOR"}'></textarea>
+    <p class="tool-hint">
+      Override the default layer→SpaceType heuristic. Keys are CAD layer
+      names (case-insensitive); values must be valid SpaceType strings
+      (ROOM_OFFICE, CORRIDOR, RESTROOM, …). Leave blank to use defaults.
+    </p>
+    <button class="btn-primary" id="dxf-preview-btn" disabled>Preview (dry-run)</button>
+    <button class="btn-primary" id="dxf-import-btn" disabled>Import DXF</button>
   </div>
 </div>
 
@@ -1453,6 +1494,7 @@ $('campus-select').addEventListener('change', async function() {
   $('add-floor-btn').disabled = true;
   $('delete-building-btn').disabled = true;
   $('delete-floor-btn').disabled = true;
+  $('delete-campus-btn').disabled = !id;
 
   // Enable AI Assistant
   $('chat-input').disabled = !id;
@@ -1682,6 +1724,133 @@ $('import-btn').addEventListener('click', async () => {
   } finally {
     $('import-btn').disabled = false;
     $('import-btn').textContent = 'Import';
+  }
+});
+
+/* ═══════════════════════════════════════════════
+   DWG / DXF Import
+   ═══════════════════════════════════════════════ */
+$('dxf-file').addEventListener('change', function() {
+  const enabled = !!this.files.length;
+  $('dxf-import-btn').disabled = !enabled;
+  $('dxf-preview-btn').disabled = !enabled;
+});
+
+/** Build the multipart form body shared by preview + commit. Returns
+ *  null if a required field is missing (and notifies the user). */
+function buildDxfFormData(dryRun) {
+  const file = $('dxf-file').files[0];
+  if (!file) return null;
+  const required = {
+    campus_id: $('dxf-campus-id').value.trim(),
+    campus_name: $('dxf-campus-name').value.trim(),
+    building_id: $('dxf-building-id').value.trim(),
+    building_name: $('dxf-building-name').value.trim(),
+    floor_id: $('dxf-floor-id').value.trim(),
+  };
+  for (const [k, v] of Object.entries(required)) {
+    if (!v) { notify(`Missing field: ${k}`, 'error'); return null; }
+  }
+
+  // Validate the layer-mapping JSON locally before posting it so the
+  // user gets an immediate parse error instead of a 422 round-trip.
+  const layerMappingRaw = $('dxf-layer-mapping').value.trim();
+  if (layerMappingRaw) {
+    try {
+      const parsed = JSON.parse(layerMappingRaw);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        notify('Layer mapping must be a JSON object', 'error');
+        return null;
+      }
+    } catch (e) {
+      notify(`Layer mapping is not valid JSON: ${e.message}`, 'error');
+      return null;
+    }
+  }
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('campus_id', required.campus_id);
+  fd.append('campus_name', required.campus_name);
+  fd.append('building_id', required.building_id);
+  fd.append('building_name', required.building_name);
+  fd.append('floor_id', required.floor_id);
+  fd.append('floor_index', $('dxf-floor-index').value || '0');
+  fd.append('floor_display_name', $('dxf-floor-name').value || 'Ground');
+
+  const orgId = $('dxf-org-id').value.trim();
+  if (orgId) fd.append('organization_id', orgId);
+  const oLat = $('dxf-origin-lat').value;
+  const oLng = $('dxf-origin-lng').value;
+  if (oLat) fd.append('origin_lat', oLat);
+  if (oLng) fd.append('origin_lng', oLng);
+  if (layerMappingRaw) fd.append('layer_mapping', layerMappingRaw);
+  if (dryRun) fd.append('dry_run', 'true');
+  return fd;
+}
+
+/** Compose a one-line summary like "OFFICE×4, CORRIDOR×2, RESTROOM×1". */
+function summarizeClassification(summary) {
+  if (!summary) return '';
+  return Object.entries(summary)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}×${v}`)
+    .join(', ');
+}
+
+/** Surface DXF auditor + geometry-repair warnings to the user. The
+ *  notify channel doesn't fit a multi-line list, so we log the full
+ *  list to the console and summarise the count in the toast. */
+function reportDxfWarnings(warnings) {
+  if (!warnings?.length) return;
+  console.warn('[DXF import] warnings:', warnings);
+  notify(`${warnings.length} parsing warning${warnings.length === 1 ? '' : 's'} (see console)`, 'info');
+}
+
+$('dxf-preview-btn').addEventListener('click', async () => {
+  const fd = buildDxfFormData(true);
+  if (!fd) return;
+  $('dxf-preview-btn').disabled = true;
+  $('dxf-preview-btn').textContent = 'Previewing...';
+  try {
+    const result = await api(`/campuses/import-dxf`, { method: 'POST', body: fd });
+    notify(`Preview: ${result.rooms_detected} rooms — ${summarizeClassification(result.classification_summary)}`);
+    reportDxfWarnings(result.warnings);
+  } catch (e) {
+    /* notify already called by api() */
+  } finally {
+    $('dxf-preview-btn').disabled = false;
+    $('dxf-preview-btn').textContent = 'Preview (dry-run)';
+  }
+});
+
+$('dxf-import-btn').addEventListener('click', async () => {
+  const fd = buildDxfFormData(false);
+  if (!fd) return;
+  const orgId = $('dxf-org-id').value.trim();
+  const campusId = $('dxf-campus-id').value.trim();
+
+  $('dxf-import-btn').disabled = true;
+  $('dxf-import-btn').textContent = 'Importing...';
+  try {
+    // Don't set Content-Type — the browser fills the multipart boundary
+    // for us when the body is a FormData.
+    const result = await api(`/campuses/import-dxf`, { method: 'POST', body: fd });
+    notify(`Imported: ${result.rooms_detected} rooms, ${result.spaces_imported} spaces, ${result.connections_imported} connections — ${summarizeClassification(result.classification_summary)}`);
+    reportDxfWarnings(result.warnings);
+    await loadOrganizations();
+    if (orgId) {
+      $('organization-select').value = orgId;
+      state.selectedOrganizationId = orgId;
+    }
+    await loadCampuses();
+    $('campus-select').value = campusId;
+    $('campus-select').dispatchEvent(new Event('change'));
+  } catch (e) {
+    /* notify already called by api() */
+  } finally {
+    $('dxf-import-btn').disabled = false;
+    $('dxf-import-btn').textContent = 'Import DXF';
   }
 });
 
@@ -1990,6 +2159,31 @@ $('delete-floor-btn').addEventListener('click', async () => {
 /* ═══════════════════════════════════════════════
    Delete Organization
    ═══════════════════════════════════════════════ */
+/* ═══════════════════════════════════════════════
+   Delete Campus
+   ═══════════════════════════════════════════════ */
+$('delete-campus-btn').addEventListener('click', async () => {
+  const campusId = state.selectedCampusId;
+  if (!campusId) return;
+  const selected = state.campuses.find(c => c.id === campusId);
+  const name = selected ? selected.name : campusId;
+  if (!window.confirm(
+    `Delete campus "${name}" and every building, floor, space, and connection it owns? This cannot be undone.`
+  )) return;
+  try {
+    $('delete-campus-btn').disabled = true;
+    await api(`/campuses/${campusId}`, { method: 'DELETE' });
+    notify(`Deleted campus "${name}"`);
+    state.selectedCampusId = null;
+    await loadCampuses();
+    $('campus-select').value = '';
+    $('campus-select').dispatchEvent(new Event('change'));
+  } catch (e) { /* handled */ }
+  finally {
+    $('delete-campus-btn').disabled = !state.selectedCampusId;
+  }
+});
+
 $('delete-org-btn').addEventListener('click', async () => {
   const orgId = state.selectedOrganizationId;
   if (!orgId) return;

@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException, Depends, Request
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File, Form
 from db import Database, get_db
 from core.auth_principal import Principal, get_principal, require_org_match, require_role
 from core.exceptions import CampusNotFound
@@ -7,6 +9,7 @@ from models.map_import import MapImportSchema
 from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
 from services.audit_service import audit_action
+from services.dxf_import_service import DxfImportService, parse_layer_mapping
 from services.import_service import ImportService
 from services.gds_service import GdsService
 from services.postgis_service import PostGISService
@@ -163,8 +166,151 @@ def import_map(
         raise HTTPException(status_code=422, detail=str(e))
 
 
+@router.post("/import-dxf")
+async def import_dxf(
+    file: UploadFile = File(...),
+    campus_id: str = Form(...),
+    campus_name: str = Form(...),
+    building_id: str = Form(...),
+    building_name: str = Form(...),
+    floor_id: str = Form(...),
+    floor_index: int = Form(0),
+    floor_display_name: str = Form("Ground"),
+    organization_id: Optional[str] = Form(None),
+    organization_name: Optional[str] = Form(None),
+    origin_lat: Optional[float] = Form(None),
+    origin_lng: Optional[float] = Form(None),
+    origin_bearing: float = Form(0.0),
+    layer_mapping: Optional[str] = Form(None),
+    dry_run: bool = Form(False),
+    db: Database = Depends(get_db),
+    principal: Principal = Depends(require_role("editor")),
+):
+    """Upload a DWG / DXF floor plan and convert + import it in one shot.
+
+    The flow is:
+        upload  →  DxfImportService.parse  →  MapImportSchema dict
+                →  (dry_run? return preview)
+                →  ImportService.import_map  →  Neo4j + PostGIS (atomic)
+                →  GdsService.refresh_projection
+
+    Same dual-write pipeline that JSON imports use; the only thing the DXF
+    leg adds is the parser. DWG uploads transcode to DXF first via
+    ODAFileConverter (returns 415 if the binary is not on PATH).
+
+    `layer_mapping` is an optional JSON object (sent as a form field
+    string) that overrides the default heuristic for layer→SpaceType
+    classification. Example: `{"WALLS_OFFICE_1": "ROOM_OFFICE"}`.
+
+    `dry_run=true` parses the file and returns the schema preview plus
+    parsing warnings WITHOUT writing to either database. Use it to
+    verify the layer-mapping result before committing the import."""
+    require_org_match(principal, organization_id)
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+
+    try:
+        layer_overrides = parse_layer_mapping(layer_mapping)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    try:
+        schema_dict = DxfImportService().parse(
+            file_bytes,
+            file.filename or "upload.dxf",
+            campus_id=campus_id,
+            campus_name=campus_name,
+            building_id=building_id,
+            building_name=building_name,
+            floor_id=floor_id,
+            floor_index=floor_index,
+            floor_display_name=floor_display_name,
+            organization_id=organization_id,
+            organization_name=organization_name,
+            origin_lat=origin_lat,
+            origin_lng=origin_lng,
+            origin_bearing=origin_bearing,
+            layer_mapping=layer_overrides,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=415, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"DXF parse failed: {exc}")
+
+    warnings = schema_dict.pop("_warnings", [])
+    classification = schema_dict.pop("_classification_summary", {})
+    spaces_in_floor = schema_dict["campus"]["buildings"][0]["floors"][0]["spaces"]
+    rooms_detected = len(spaces_in_floor)
+
+    try:
+        schema = MapImportSchema(**schema_dict)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Schema validation failed: {exc}")
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "rooms_detected": rooms_detected,
+            "classification_summary": classification,
+            "warnings": warnings,
+            "preview_spaces": [
+                {
+                    "id": s["id"],
+                    "display_name": s["display_name"],
+                    "space_type": s["space_type"],
+                }
+                for s in spaces_in_floor
+            ],
+        }
+
+    from services.audit_service import write_audit_log
+    try:
+        result = ImportService(db).import_map(schema)
+        GdsService(db).refresh_projection()
+        write_audit_log(
+            action="import_dxf",
+            success=True,
+            subject_user_id=principal.user_id,
+            organization_id=organization_id,
+            detail={
+                "campus_id": campus_id,
+                "filename": file.filename,
+                "spaces_imported": result.get("spaces_imported"),
+                "rooms_detected": rooms_detected,
+                "warnings_count": len(warnings),
+            },
+        )
+        return {
+            **result,
+            "rooms_detected": rooms_detected,
+            "classification_summary": classification,
+            "warnings": warnings,
+        }
+    except Exception as exc:
+        write_audit_log(
+            action="import_dxf",
+            success=False,
+            subject_user_id=principal.user_id,
+            organization_id=organization_id,
+            detail={"campus_id": campus_id, "filename": file.filename, "error": str(exc)},
+        )
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
 @router.get("/{campus_id}/export")
 def export_map(campus_id: str, db: Database = Depends(get_db)):
+    """Export a campus as a JSON document that can be re-imported through
+    `POST /campuses/{campus_id}/import` without modification — the shape
+    matches `MapImportSchema` exactly. The `connections` array carries
+    pairwise edges in the `{from_space_id, to_space_id, connection_type,
+    is_accessible}` shape the import expects, sourced from the
+    PostGIS-mirrored `space_connections` table when available and
+    derived from Neo4j `:CONNECTS_TO` edges otherwise."""
+
     try:
         campus = CampusRepository(db).get_campus(campus_id)
     except CampusNotFound as e:
@@ -172,42 +318,65 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
 
     campus_repo = CampusRepository(db)
     space_repo = SpaceRepository(db)
+    DOOR_LIKE_TYPES = {
+        "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED",
+        "DOOR_EMERGENCY", "PASSAGE",
+    }
+
+    _CAMPUS_STRIP = {"created_at", "updated_at"}
+    _BUILDING_STRIP = {"created_at", "updated_at", "campus_id"}
+    _FLOOR_STRIP = {"created_at", "updated_at", "building_id"}
+
+    def _strip(d: dict, drop: set[str]) -> dict:
+        return {k: v for k, v in d.items() if k not in drop and v is not None}
+
+    def _clean_space(s: dict) -> dict:
+        DROP = {
+            "campus_id", "building_id", "floor_id", "floor_index",
+            "embedding", "tags_text", "traversal_cost",
+            "centroid_lat", "centroid_lon", "polygon_global",
+            "created_at", "updated_at",
+        }
+        out = {k: v for k, v in s.items() if k not in DROP}
+        if "subspaces" in out and isinstance(out["subspaces"], list):
+            out["subspaces"] = [_clean_space(sub) for sub in out["subspaces"]]
+        return out
+
     buildings_out = []
     for building in campus_repo.list_buildings(campus_id):
         floors_out = []
         for floor in campus_repo.list_floors(building["id"]):
-            spaces_out = space_repo.get_floor_spaces_with_subspaces(floor["id"])
-            floors_out.append({**floor, "spaces": spaces_out})
-        buildings_out.append({**building, "floors": floors_out})
+            raw_spaces = space_repo.get_floor_spaces_with_subspaces(floor["id"])
+            kept_spaces = [
+                _clean_space(s)
+                for s in raw_spaces
+                if s.get("space_type") not in DOOR_LIKE_TYPES
+            ]
+            floors_out.append({**_strip(floor, _FLOOR_STRIP), "spaces": kept_spaces})
+        buildings_out.append({**_strip(building, _BUILDING_STRIP), "floors": floors_out})
 
-    # Export connection nodes (doors/passages) with their connected spaces
-    conn_types = [
-        "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE",
-        "STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP",
-    ]
-    conn_result = db.execute(
-        """
-        MATCH (conn:Space {campus_id: $campus_id})
-        WHERE conn.space_type IN $conn_types
-        OPTIONAL MATCH (conn)-[:CONNECTS_TO]->(neighbor:Space)
-        WHERE NOT neighbor.space_type IN $conn_types
-        RETURN conn, collect(DISTINCT neighbor.id) AS connected_ids
-        """,
-        {"campus_id": campus_id, "conn_types": conn_types},
-    )
-    connections_out = []
-    for row in conn_result:
-        node = row["conn"]
-        connections_out.append({
-            "id": node.get("id"),
-            "display_name": node.get("display_name", "Door"),
-            "space_type": node.get("space_type"),
-            "connects": row["connected_ids"],
-            "centroid_x": node.get("centroid_x"),
-            "centroid_y": node.get("centroid_y"),
-            "is_accessible": node.get("is_accessible", True),
-            "tags": node.get("tags", []),
-        })
+    connections_out = PostGISService().list_campus_connections(campus_id)
+    if not connections_out:
+        connections_out = _derive_connections_from_neo4j(db, campus_id)
+
+    for c in connections_out:
+        raw_ct = c.get("connection_type")
+        ct = (str(raw_ct).upper() if raw_ct is not None else "OPEN")
+
+        if ct in DOOR_LIKE_TYPES:
+            if ct.startswith("DOOR_"):
+                c["door_type"] = ct.split("DOOR_", 1)[1]
+            else:
+                c["door_type"] = None
+            c["connection_type"] = "DOOR"
+        else:
+            c["connection_type"] = ct
+
+        if "is_accessible" not in c:
+            c["is_accessible"] = True
+        c.setdefault("requires_access_level", None)
+        c.setdefault("transition_time_s", None)
+        c.setdefault("weight_override", None)
 
     organization = None
     org_id = campus.get("organization_id") if isinstance(campus, dict) else None
@@ -215,7 +384,14 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
         from repositories.campus_repo import OrganizationRepository
         from core.exceptions import OrganizationNotFound
         try:
-            organization = OrganizationRepository(db).get_organization(org_id)
+            org_raw = OrganizationRepository(db).get_organization(org_id)
+            organization = {
+                "id": org_raw.get("id"),
+                "name": org_raw.get("name"),
+                "entity_type": org_raw.get("entity_type") or "OTHER",
+                "description": org_raw.get("description"),
+            }
+            organization = {k: v for k, v in organization.items() if v is not None}
         except OrganizationNotFound:
             organization = None
 
@@ -223,11 +399,58 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
         "schema_version": "1.0",
         "organization": organization,
         "campus": {
-            **campus,
+            **_strip(campus, _CAMPUS_STRIP),
             "buildings": buildings_out,
+            "outdoor_spaces": [],
             "connections": connections_out,
         },
     }
+
+
+def _derive_connections_from_neo4j(db, campus_id: str) -> list[dict]:
+    """Fallback path: compute the import-compatible connections list
+    directly from Neo4j `:CONNECTS_TO` edges."""
+    rows = db.execute(
+        """
+        MATCH (a:Space {campus_id: $campus_id})-[:CONNECTS_TO]->(b:Space)
+        OPTIONAL MATCH (fa:Floor)-[:HAS_SPACE]->(a)
+        OPTIONAL MATCH (fb:Floor)-[:HAS_SPACE]->(b)
+        RETURN a.id AS from_id, b.id AS to_id,
+               a.space_type AS a_type, b.space_type AS b_type,
+               coalesce(a.is_accessible, true) AND coalesce(b.is_accessible, true) AS is_accessible,
+               fa.floor_index AS a_floor, fb.floor_index AS b_floor
+        """,
+        {"campus_id": campus_id},
+    )
+    DOOR_LIKE = {"DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE"}
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for r in rows:
+        from_id, to_id = r["from_id"], r["to_id"]
+        if (from_id, to_id) in seen:
+            continue
+        seen.add((from_id, to_id))
+        a_type = r["a_type"] or ""
+        b_type = r["b_type"] or ""
+        a_floor = r.get("a_floor")
+        b_floor = r.get("b_floor")
+        if a_type == "STAIRCASE" and b_type == "STAIRCASE":
+            ct = "STAIRCASE_UP" if (a_floor or 0) <= (b_floor or 0) else "STAIRCASE_DOWN"
+        elif a_type == "ELEVATOR" and b_type == "ELEVATOR":
+            ct = "ELEVATOR_UP" if (a_floor or 0) <= (b_floor or 0) else "ELEVATOR_DOWN"
+        elif a_type == "ESCALATOR" or b_type == "ESCALATOR":
+            ct = "ESCALATOR"
+        elif a_type in DOOR_LIKE or b_type in DOOR_LIKE:
+            ct = "DOOR"
+        else:
+            ct = "OPEN"
+        out.append({
+            "from_space_id": from_id,
+            "to_space_id": to_id,
+            "connection_type": ct,
+            "is_accessible": bool(r["is_accessible"]) if r["is_accessible"] is not None else True,
+        })
+    return out
 
 
 @router.get("/{campus_id}/search")

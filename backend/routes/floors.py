@@ -210,3 +210,28 @@ def floor_map_overlay(floor_id: str, db: Database = Depends(get_db)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching floor map overlay data: {str(e)}")
+
+
+@router.delete("/{floor_id}", status_code=204)
+def delete_floor(
+    floor_id: str,
+    db: Database = Depends(get_db),
+    principal: Principal = Depends(require_role("editor")),
+):
+    try:
+        existing = CampusRepository(db).get_floor(floor_id)
+    except FloorNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    org_id = existing.get("organization_id") if isinstance(existing, dict) else None
+    require_org_match(principal, org_id)
+    with audit_action("delete_floor", principal, organization_id=org_id) as detail:
+        detail["floor_id"] = floor_id
+        try:
+            result = CampusRepository(db).delete_floor(floor_id)
+        except FloorNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        PostGISService().delete_floor_cascade(
+            building_id=result["building_id"],
+            floor_id=result["floor_id"],
+            space_ids=result["space_ids"],
+        )

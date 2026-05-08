@@ -883,6 +883,43 @@ class PostGISService:
             print(f"Error deleting floor {floor_pk} from PostGIS: {e}")
             return False
 
+    def delete_floor_cascade(
+        self,
+        building_id: str,
+        floor_id: str,
+        space_ids: list[str],
+    ) -> bool:
+        """Delete every PostGIS row belonging to a single floor"""
+        if not self.engine or not settings.supabase_enable_sync:
+            return False
+        try:
+            session = self._open_session()
+
+            if space_ids:
+                session.query(SpaceConnection).filter(
+                    or_(
+                        SpaceConnection.from_space_id.in_(space_ids),
+                        SpaceConnection.to_space_id.in_(space_ids),
+                        SpaceConnection.door_space_id.in_(space_ids),
+                        SpaceConnection.connection_group_id.in_(space_ids),
+                    )
+                ).delete(synchronize_session=False)
+
+                session.query(BuildingSpace).filter(
+                    BuildingSpace.id.in_(space_ids)
+                ).delete(synchronize_session=False)
+
+            session.query(Floor).filter_by(
+                id=f"{building_id}_{floor_id}"
+            ).delete(synchronize_session=False)
+
+            session.commit()
+            session.close()
+            return True
+        except Exception as e:
+            print(f"Error cascading floor delete {building_id}/{floor_id} in PostGIS: {e}")
+            return False
+
     # --- connections ---
 
     def sync_connection(
@@ -894,9 +931,7 @@ class PostGISService:
         is_accessible: bool = True,
     ) -> bool:
         """Mirror the four CONNECTS_TO edges produced by create_connection() as
-        rows in space_connections. The `connection_group_id` lets us identify
-        all rows belonging to the same user-created connection so the whole
-        group can be removed atomically on delete."""
+        rows in space_connections."""
         if not self.engine or not settings.supabase_enable_sync:
             return False
         try:
@@ -976,6 +1011,93 @@ class PostGISService:
         except Exception as e:
             print(f"Error syncing direct edge {from_space_id}->{to_space_id} to PostGIS: {e}")
             return False
+
+    def list_campus_connections(self, campus_id: str) -> list[dict]:
+        """Return every space_connections row whose `from_space_id` belongs
+        to a space in this campus, in the import-compatible shape:
+        `{from_space_id, to_space_id, connection_type, is_accessible}`."""
+        if not self.engine or not settings.supabase_enable_sync:
+            return []
+        try:
+            session = self._open_session()
+            try:
+                rows = session.execute(
+                    text(
+                        """
+                        SELECT sc.from_space_id, sc.to_space_id,
+                               sc.connection_type, sc.is_accessible,
+                               sc.door_space_id
+                          FROM space_connections sc
+                          JOIN building_spaces bs ON bs.id = sc.from_space_id
+                         WHERE bs.campus_id = :campus_id
+                        """
+                    ),
+                    {"campus_id": campus_id},
+                ).all()
+            finally:
+                session.close()
+
+            out: list[dict] = []
+            seen: set[tuple] = set()
+
+            for r in rows:
+                from_id, to_id, ctype, is_acc, door_id = r[0], r[1], r[2], r[3], r[4]
+                if door_id is None:
+                    key = (from_id, to_id, ctype or "OPEN")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append({
+                        "from_space_id": from_id,
+                        "to_space_id": to_id,
+                        "connection_type": ctype or "OPEN",
+                        "is_accessible": bool(is_acc) if is_acc is not None else True,
+                    })
+
+            door_groups: dict[str, list] = {}
+            for r in rows:
+                door_id = r[4]
+                if door_id is None:
+                    continue
+                door_groups.setdefault(door_id, []).append(r)
+
+            for door_id, group_rows in door_groups.items():
+                endpoints: set[str] = set()
+                group_conn_type = None
+                group_access = None
+                for r in group_rows:
+                    a, b, ctype, is_acc, _ = r[0], r[1], r[2], r[3], r[4]
+                    if a != door_id:
+                        endpoints.add(a)
+                    if b != door_id:
+                        endpoints.add(b)
+                    if group_conn_type is None and ctype is not None:
+                        group_conn_type = ctype
+                    if group_access is None and is_acc is not None:
+                        group_access = bool(is_acc)
+
+                endpoints_list = list(endpoints)
+                for i in range(len(endpoints_list)):
+                    for j in range(len(endpoints_list)):
+                        if i == j:
+                            continue
+                        a = endpoints_list[i]
+                        b = endpoints_list[j]
+                        key = (a, b, group_conn_type or "DOOR")
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        out.append({
+                            "from_space_id": a,
+                            "to_space_id": b,
+                            "connection_type": group_conn_type or "DOOR",
+                            "is_accessible": group_access if group_access is not None else True,
+                        })
+
+            return out
+        except Exception as e:
+            print(f"Error listing connections for campus {campus_id}: {e}")
+            return []
 
     def delete_edges_for_space(self, space_id: str) -> bool:
         """Remove any space_connections rows touching the given space: edges
