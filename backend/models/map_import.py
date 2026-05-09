@@ -89,6 +89,8 @@ class ConnectionNodeImport(BaseModel):
     requires_access_level: Optional[str] = None
     transition_time_s: Optional[float] = None
     weight_override: Optional[float] = None
+    door_cx: Optional[float] = None
+    door_cy: Optional[float] = None
 
     @validator('connection_type', pre=True)
     def validate_connection_type(cls, v):

@@ -1,3 +1,5 @@
+import uuid
+
 from db import Database
 from models.map_import import MapImportSchema, SpaceImport, ConnectionNodeImport
 from models.campus import (
@@ -7,6 +9,7 @@ from models.campus import (
     OrganizationCreate,
 )
 from models.space import SpaceCreate
+from shared.models.enums import SpaceType
 from repositories.campus_repo import CampusRepository, OrganizationRepository
 from repositories.space_repo import SpaceRepository
 from repositories.connection_repo import ConnectionRepository
@@ -15,10 +18,12 @@ from services.geometry_service import (
     area_from_polygon,
     distance_m,
     compute_traversal_cost,
+    find_shared_edge_midpoint,
     local_to_global_coordinates,
     polygon_local_to_global,
 )
 from services.postgis_service import PostGISService
+from services.space_sync import build_space_sync_payload
 from sentence_transformers import SentenceTransformer
 
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
@@ -319,15 +324,136 @@ class ImportService:
             )
 
     def _import_connection_node(self, conn: ConnectionNodeImport) -> None:
-        self.conn_repo.create_connection(conn.from_space_id, conn.to_space_id)
-        connection_type = (
+        ct = (
             conn.connection_type.value
             if hasattr(conn.connection_type, "value")
             else (str(conn.connection_type) if conn.connection_type is not None else None)
         )
+        ct_upper = (ct or "").upper()
+
+        # Door-pattern types: materialize a door Space at the midpoint and
+        # four bidirectional edges, mirroring routes/connections.py POST.
+        if ct_upper in {"DOOR", "DOORWAY", "PASSAGE"}:
+            self._create_door_space_connection(conn, ct_upper)
+            return
+
+        # Other types (STAIRCASE_*, ELEVATOR_*, ESCALATOR, RAMP, OPEN, ...)
+        # remain direct A→B edges.
+        self.conn_repo.create_connection(conn.from_space_id, conn.to_space_id)
         self.postgis.sync_direct_edge(
             from_space_id=conn.from_space_id,
             to_space_id=conn.to_space_id,
-            connection_type=connection_type,
+            connection_type=ct,
             is_accessible=bool(getattr(conn, "is_accessible", True)),
+        )
+
+    def _create_door_space_connection(
+        self,
+        conn: ConnectionNodeImport,
+        ct_upper: str,
+    ) -> None:
+        space_a = self.space_repo.get_space(conn.from_space_id)
+        space_b = self.space_repo.get_space(conn.to_space_id)
+
+        # Door midpoint: prefer explicit coords from the import, else
+        # shared-edge midpoint, else centroid average.
+        cx, cy = conn.door_cx, conn.door_cy
+        if cx is None or cy is None:
+            poly_a = space_a.get("polygon")
+            poly_b = space_b.get("polygon")
+            if poly_a and poly_b:
+                mid = find_shared_edge_midpoint(poly_a, poly_b)
+                if mid:
+                    cx, cy = mid
+        if cx is None or cy is None:
+            cx_a, cy_a = space_a.get("centroid_x"), space_a.get("centroid_y")
+            cx_b, cy_b = space_b.get("centroid_x"), space_b.get("centroid_y")
+            if all(v is not None for v in (cx_a, cy_a, cx_b, cy_b)):
+                cx = (cx_a + cx_b) / 2.0
+                cy = (cy_a + cy_b) / 2.0
+
+        # Pick a SpaceType for the door from connection_type + door_type.
+        door_type_str = (
+            conn.door_type.value if hasattr(conn.door_type, "value")
+            else (str(conn.door_type) if conn.door_type is not None else None)
+        )
+        if ct_upper == "PASSAGE":
+            door_space_type = SpaceType.PASSAGE
+        else:
+            door_space_type = {
+                "STANDARD": SpaceType.DOOR_STANDARD,
+                "AUTOMATIC": SpaceType.DOOR_AUTOMATIC,
+                "LOCKED": SpaceType.DOOR_LOCKED,
+                "EMERGENCY": SpaceType.DOOR_EMERGENCY,
+            }.get((door_type_str or "").upper(), SpaceType.DOOR_STANDARD)
+
+        # Match the convention from routes/connections.py: floor_id is set
+        # only when both endpoints share the same floor.
+        floor_a = space_a.get("floor_id")
+        floor_b = space_b.get("floor_id")
+        floor_id = floor_a if floor_a == floor_b else None
+        floor_index = space_a.get("floor_index") if floor_a == floor_b else None
+        building_id = space_a.get("building_id")
+        if space_b.get("building_id") != building_id:
+            building_id = None
+        campus_id = space_a.get("campus_id")
+        organization_id = space_a.get("organization_id") or space_b.get("organization_id")
+
+        # Carry connection-level metadata onto the door Space's metadata so
+        # it round-trips on re-export.
+        meta: dict = {}
+        if conn.requires_access_level is not None:
+            meta["requires_access_level"] = conn.requires_access_level
+        if conn.transition_time_s is not None:
+            meta["transition_time_s"] = conn.transition_time_s
+        if conn.weight_override is not None:
+            meta["weight_override"] = conn.weight_override
+
+        door_id = f"door_{uuid.uuid4().hex[:12]}"
+        traversal_cost = compute_traversal_cost(door_space_type.value, None, None, None)
+
+        # Compute global coords if the building has an origin.
+        global_lat, global_lng = None, None
+        if building_id and cx is not None and cy is not None:
+            building = self.campus_repo.get_building(building_id)
+            if building.get("origin_lat") is not None and building.get("origin_lng") is not None:
+                global_lat, global_lng = local_to_global_coordinates(
+                    cx, cy, building["origin_lat"], building["origin_lng"],
+                    building.get("origin_bearing") or 0.0,
+                )
+
+        is_accessible = bool(getattr(conn, "is_accessible", True))
+        door_space = self.space_repo.create_space(
+            SpaceCreate(
+                id=door_id,
+                display_name=door_space_type.value.replace("_", " ").title(),
+                space_type=door_space_type,
+                campus_id=campus_id,
+                building_id=building_id,
+                floor_id=floor_id,
+                floor_index=floor_index,
+                organization_id=organization_id,
+                centroid_x=cx,
+                centroid_y=cy,
+                centroid_lat=global_lat,
+                centroid_lng=global_lng,
+                is_accessible=is_accessible,
+                is_navigable=True,
+                traversal_cost=traversal_cost,
+                metadata=meta or None,
+            )
+        )
+        self.postgis.sync_space(build_space_sync_payload(door_space, self.campus_repo))
+
+        self.conn_repo.create_connection(conn.from_space_id, door_id)
+        self.conn_repo.create_connection(door_id, conn.from_space_id)
+        self.conn_repo.create_connection(conn.to_space_id, door_id)
+        self.conn_repo.create_connection(door_id, conn.to_space_id)
+
+        self.postgis.sync_connection(
+            from_space_id=conn.from_space_id,
+            to_space_id=conn.to_space_id,
+            door_space_id=door_id,
+            connection_type=door_space_type.value,
+            is_accessible=is_accessible,
         )

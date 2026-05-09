@@ -377,16 +377,48 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
     if not connections_out:
         connections_out = _derive_connections_from_neo4j(db, campus_id)
 
+    # Enrich any connection that names a `door_id` but doesn't already carry
+    # the door's centroid (PostGIS path) by looking up the door Space.
+    door_ids_to_lookup = {
+        c["door_id"] for c in connections_out
+        if c.get("door_id") and (c.get("door_cx") is None or c.get("door_cy") is None)
+    }
+    door_lookup: dict[str, dict] = {}
+    if door_ids_to_lookup:
+        door_rows = db.execute(
+            """
+            MATCH (s:Space) WHERE s.id IN $ids
+            RETURN s.id AS id, s.centroid_x AS cx, s.centroid_y AS cy,
+                   s.space_type AS space_type
+            """,
+            {"ids": list(door_ids_to_lookup)},
+        )
+        door_lookup = {r["id"]: dict(r) for r in door_rows}
+
     for c in connections_out:
+        if c.get("door_id") and c["door_id"] in door_lookup:
+            ds = door_lookup[c["door_id"]]
+            c.setdefault("door_cx", ds.get("cx"))
+            c.setdefault("door_cy", ds.get("cy"))
+            # If door_type wasn't set yet, derive it from the door Space.
+            if not c.get("door_type"):
+                st = ds.get("space_type") or ""
+                if isinstance(st, str) and st.startswith("DOOR_"):
+                    c["door_type"] = st.split("DOOR_", 1)[1]
+
         raw_ct = c.get("connection_type")
         ct = (str(raw_ct).upper() if raw_ct is not None else "OPEN")
 
         if ct in DOOR_LIKE_TYPES:
             if ct.startswith("DOOR_"):
                 c["door_type"] = ct.split("DOOR_", 1)[1]
+                c["connection_type"] = "DOOR"
+            elif ct == "PASSAGE":
+                c["connection_type"] = "PASSAGE"
+                c.setdefault("door_type", None)
             else:
-                c["door_type"] = None
-            c["connection_type"] = "DOOR"
+                c.setdefault("door_type", None)
+                c["connection_type"] = "DOOR"
         else:
             c["connection_type"] = ct
 
@@ -427,29 +459,95 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
 
 def _derive_connections_from_neo4j(db, campus_id: str) -> list[dict]:
     """Fallback path: compute the import-compatible connections list
-    directly from Neo4j `:CONNECTS_TO` edges."""
+    directly from Neo4j `:CONNECTS_TO` edges.
+
+    Room→Door→Room patterns are collapsed to a single logical Room↔Room
+    connection per (ordered) pair, with the door's centroid carried through
+    as `door_cx`/`door_cy` so re-imports preserve the door midpoint. Any
+    edges that don't fit the door pattern (e.g. STAIRCASE→STAIRCASE,
+    ELEVATOR↔ELEVATOR, direct edges from older imports) pass through as
+    direct edges with the same heuristic connection_type as before."""
     rows = db.execute(
         """
         MATCH (a:Space {campus_id: $campus_id})-[:CONNECTS_TO]->(b:Space)
         OPTIONAL MATCH (fa:Floor)-[:HAS_SPACE]->(a)
         OPTIONAL MATCH (fb:Floor)-[:HAS_SPACE]->(b)
-        RETURN a.id AS from_id, b.id AS to_id,
-               a.space_type AS a_type, b.space_type AS b_type,
-               coalesce(a.is_accessible, true) AND coalesce(b.is_accessible, true) AS is_accessible,
+        RETURN a.id AS a_id, a.space_type AS a_type,
+               a.centroid_x AS a_cx, a.centroid_y AS a_cy,
+               coalesce(a.is_accessible, true) AS a_acc,
+               b.id AS b_id, b.space_type AS b_type,
+               b.centroid_x AS b_cx, b.centroid_y AS b_cy,
+               coalesce(b.is_accessible, true) AS b_acc,
                fa.floor_index AS a_floor, fb.floor_index AS b_floor
         """,
         {"campus_id": campus_id},
     )
     DOOR_LIKE = {"DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY", "PASSAGE"}
+
+    # Bucket door-pattern edges by their door space.
+    door_groups: dict[str, dict] = {}
+    direct_rows: list[dict] = []
+    for r in rows:
+        a_id, b_id = r["a_id"], r["b_id"]
+        if a_id == b_id:
+            continue
+        a_type, b_type = r["a_type"] or "", r["b_type"] or ""
+        if a_type in DOOR_LIKE and b_type not in DOOR_LIKE:
+            g = door_groups.setdefault(a_id, {
+                "door_type": a_type,
+                "door_cx": r["a_cx"], "door_cy": r["a_cy"],
+                "door_acc": bool(r["a_acc"]),
+                "endpoints": {},
+            })
+            g["endpoints"][b_id] = bool(r["b_acc"])
+        elif b_type in DOOR_LIKE and a_type not in DOOR_LIKE:
+            g = door_groups.setdefault(b_id, {
+                "door_type": b_type,
+                "door_cx": r["b_cx"], "door_cy": r["b_cy"],
+                "door_acc": bool(r["b_acc"]),
+                "endpoints": {},
+            })
+            g["endpoints"][a_id] = bool(r["a_acc"])
+        else:
+            direct_rows.append(r)
+
     out: list[dict] = []
     seen: set[tuple] = set()
-    for r in rows:
-        from_id, to_id = r["from_id"], r["to_id"]
-        if (from_id, to_id) in seen:
+
+    for g in door_groups.values():
+        endpoints = list(g["endpoints"].items())
+        # Strip "DOOR_" prefix to get the DoorType enum value (STANDARD, ...).
+        door_type_suffix = (
+            g["door_type"].split("DOOR_", 1)[1]
+            if g["door_type"].startswith("DOOR_") else None
+        )
+        connection_type = "PASSAGE" if g["door_type"] == "PASSAGE" else "DOOR"
+        for i in range(len(endpoints)):
+            for j in range(len(endpoints)):
+                if i == j:
+                    continue
+                a_id, a_acc = endpoints[i]
+                b_id, b_acc = endpoints[j]
+                key = (a_id, b_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({
+                    "from_space_id": a_id,
+                    "to_space_id": b_id,
+                    "connection_type": connection_type,
+                    "door_type": door_type_suffix,
+                    "is_accessible": g["door_acc"] and a_acc and b_acc,
+                    "door_cx": g["door_cx"],
+                    "door_cy": g["door_cy"],
+                })
+
+    for r in direct_rows:
+        a_id, b_id = r["a_id"], r["b_id"]
+        if (a_id, b_id) in seen:
             continue
-        seen.add((from_id, to_id))
-        a_type = r["a_type"] or ""
-        b_type = r["b_type"] or ""
+        seen.add((a_id, b_id))
+        a_type, b_type = r["a_type"] or "", r["b_type"] or ""
         a_floor = r.get("a_floor")
         b_floor = r.get("b_floor")
         if a_type == "STAIRCASE" and b_type == "STAIRCASE":
@@ -458,15 +556,13 @@ def _derive_connections_from_neo4j(db, campus_id: str) -> list[dict]:
             ct = "ELEVATOR_UP" if (a_floor or 0) <= (b_floor or 0) else "ELEVATOR_DOWN"
         elif a_type == "ESCALATOR" or b_type == "ESCALATOR":
             ct = "ESCALATOR"
-        elif a_type in DOOR_LIKE or b_type in DOOR_LIKE:
-            ct = "DOOR"
         else:
             ct = "OPEN"
         out.append({
-            "from_space_id": from_id,
-            "to_space_id": to_id,
+            "from_space_id": a_id,
+            "to_space_id": b_id,
             "connection_type": ct,
-            "is_accessible": bool(r["is_accessible"]) if r["is_accessible"] is not None else True,
+            "is_accessible": bool(r["a_acc"]) and bool(r["b_acc"]),
         })
     return out
 

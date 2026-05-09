@@ -1092,6 +1092,7 @@ class PostGISService:
                             "to_space_id": b,
                             "connection_type": group_conn_type or "DOOR",
                             "is_accessible": group_access if group_access is not None else True,
+                            "door_id": door_id,
                         })
 
             return out

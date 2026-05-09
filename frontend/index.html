@@ -1012,12 +1012,6 @@ function render() {
         ctx.lineWidth = 0.5;
         ctx.fillRect(cx - size, cy - size/2, size * 2, size);
         ctx.strokeRect(cx - size, cy - size/2, size * 2, size);
-        // Debug halo for clickable area (12px radius)
-        ctx.beginPath();
-        ctx.strokeStyle = 'rgba(0,150,250,0.18)';
-        ctx.lineWidth = 1;
-        ctx.arc(cx, cy, 12, 0, Math.PI * 2);
-        ctx.stroke();
         if (showLabels) {
           const fontSize = Math.min(10, Math.max(7, effScale * 0.5));
           ctx.font = `${fontSize}px -apple-system, sans-serif`;
@@ -1326,11 +1320,8 @@ canvas.addEventListener('mousedown', e => {
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
 
-  // Debug: log coordinates and hit test result to help diagnose click issues
-  console.debug('[mouse] down', Math.round(mx), Math.round(my));
   if (state.mode !== 'moveSpace') {
     const hit = hitTest(mx, my);
-    console.debug('[mouse] hitTest ->', hit ? { id: hit.id, type: hit.space_type, cx: hit.centroid_x, cy: hit.centroid_y } : null);
     // If clicking a door-like node, enter move mode for that node instead
     if (hit && (!hit.polygon || hit.polygon.length < 3) && (String(hit.space_type || '').toUpperCase().includes('DOOR') || String(hit.space_type || '').toUpperCase() === 'PASSAGE')) {
       startMoveMode(hit);
@@ -1373,7 +1364,6 @@ canvas.addEventListener('mousemove', e => {
   if (state.mode === 'moveSpace' && state.moveSpace) {
     const [rawWx, rawWy] = canvasToWorld(mx, my);
     const s = state.moveSpace;
-    console.debug('[move] dragging', s.id, rawWx.toFixed(2), rawWy.toFixed(2));
     if (state.moveOrigPoly) {
       const origBB = getSpaceBBox({ polygon: state.moveOrigPoly });
       const halfW = (origBB.maxX - origBB.minX) / 2;
@@ -1754,16 +1744,17 @@ async function loadFloorConnections(floorId) {
   try {
     state.connections = await api(`/floors/${floorId}/connections`);
 
-    // Ensure door-like preview nodes exist for connections that don't
-    // already have a nearby explicit door node. This creates preview
-    // nodes only where needed so editors can see and move connection
-    // endpoints even when the DB doesn't expose door spaces.
+    // The backend collapses Room→Door→Room patterns into one row with
+    // door_id/door_cx/door_cy populated when a real door Space exists.
+    // For legacy direct edges (door_id == null) we synthesize a phantom
+    // midpoint marker so the editor still has something draggable.
     const spaceMap = {};
     for (const s of state.spaces) spaceMap[s.id] = s;
     const synth = [];
     const conns = state.connections || [];
     for (let ci = 0; ci < conns.length; ci++) {
       const c = conns[ci];
+      if (c.door_id) continue;  // real door already in state.spaces
       const fromId = c.from_id || c.from_space_id || c.from;
       const toId = c.to_id || c.to_space_id || c.to;
       const a = spaceMap[fromId];
@@ -1772,34 +1763,21 @@ async function loadFloorConnections(floorId) {
       if (a.centroid_x == null || b.centroid_x == null) continue;
       const dx = (a.centroid_x + b.centroid_x) / 2.0;
       const dy = (a.centroid_y + b.centroid_y) / 2.0;
-      // Skip if there's already a door-like space very close to this midpoint
-      const nearby = state.spaces.some(s => s.centroid_x != null && s.centroid_y != null && (String(s.space_type || '').toUpperCase().includes('DOOR') || String(s.space_type || '').toUpperCase() === 'PASSAGE') && Math.hypot(s.centroid_x - dx, s.centroid_y - dy) < 0.5);
-      if (nearby) continue;
       const doorId = `synth_conn_${ci}`;
-      const stype = (c.connection_type && String(c.connection_type).toUpperCase().startsWith('DOOR')) ? c.connection_type : 'DOOR_STANDARD';
       synth.push({
         id: doorId,
         display_name: '',
-        space_type: stype,
+        space_type: 'DOOR_STANDARD',
         centroid_x: dx,
         centroid_y: dy,
         polygon: null,
         is_accessible: c.is_accessible ?? true,
-        metadata: { synthesized: true, preview: true, preview_from: fromId, preview_to: toId, preview_connection_index: ci },
+        metadata: { synthesized: true, preview_from: fromId, preview_to: toId, preview_connection_index: ci },
       });
     }
     if (synth.length) {
       state.spaces = [...state.spaces, ...synth];
-      // Ensure the UI updates after synthesizing nodes
       fitToCanvas();
-      // Log synthesized door nodes (world + canvas coords) for debugging
-      try {
-        const list = synth.map(d => {
-          const [cx, cy] = worldToCanvas(d.centroid_x, d.centroid_y);
-          return { id: d.id, world_x: d.centroid_x, world_y: d.centroid_y, canvas_x: Math.round(cx), canvas_y: Math.round(cy) };
-        });
-        console.log('[map] Synthesized door nodes', list);
-      } catch (e) { console.debug('[map] Synth log failed', e); }
       updateMapVisibility();
     }
     // Always re-render when connections change so arrows/boxes appear
@@ -2107,14 +2085,6 @@ $('dxf-preview-btn').addEventListener('click', async () => {
       state.connections = previewConns || [];
       state._isPreview = true;
       fitToCanvas();
-      // Log preview door nodes with canvas coordinates to help debugging
-      try {
-        const list = doorNodes.map(d => {
-          const [cx, cy] = worldToCanvas(d.centroid_x, d.centroid_y);
-          return { id: d.id, world_x: d.centroid_x, world_y: d.centroid_y, canvas_x: Math.round(cx), canvas_y: Math.round(cy) };
-        });
-        if (list.length) console.log('[map] Preview door nodes', list);
-      } catch (e) { console.debug('[map] preview door log failed', e); }
       updateMapVisibility();
       render();
       notify('DXF preview loaded (temporary). Move items to adjust; nothing is saved.', 'info');
@@ -3199,7 +3169,6 @@ function startMoveMode(space) {
   state.moveOrigPoly = space.polygon ? space.polygon.map(p => [...p]) : null;
   state.moveOrigCentroid = [space.centroid_x, space.centroid_y];
   canvas.classList.add('crosshair');
-  console.log('[move] startMoveMode', space.id, space.centroid_x, space.centroid_y, space.metadata && space.metadata.preview ? 'preview' : 'persisted');
   for (const btn of document.querySelectorAll('.tool-bar button')) {
     btn.classList.remove('active');
   }
@@ -3211,13 +3180,52 @@ async function finishMove() {
   const space = state.moveSpace;
   if (!space) return;
   state.snapLines = [];
-  console.log('[move] finishMove', space.id, space.centroid_x, space.centroid_y, space.metadata && space.metadata.preview ? 'preview' : 'persisted');
   try {
-    // If this is a preview-only space, do not persist changes to the backend.
+    // DXF dry-run preview: visual-only, do not persist.
     if (space.metadata && space.metadata.preview) {
       notify(`Moved "${space.display_name || 'preview item'}" (preview)`);
       exitMoveMode();
       return;
+    }
+
+    // Synthesized door midpoint for a legacy direct-edge connection.
+    // Promote it to a real door Space via PATCH /connections/{from}/{to}.
+    if (space.metadata && space.metadata.synthesized) {
+      const fromId = space.metadata.preview_from;
+      const toId = space.metadata.preview_to;
+      if (!fromId || !toId) throw new Error('Synth door missing endpoint metadata');
+      await api(`/connections/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ door_cx: space.centroid_x, door_cy: space.centroid_y }),
+      });
+      notify('Door midpoint saved.');
+      // Reload so the synth node is replaced by the now-real door Space.
+      if (state.selectedFloorId) await reloadCurrentFloor();
+      exitMoveMode();
+      return;
+    }
+
+    // Real door Space (DOOR_*/PASSAGE without polygon): route through the
+    // connection endpoint so PostGIS connection-group rows stay in sync.
+    const stUpper = String(space.space_type || '').toUpperCase();
+    const isDoorNode = (!space.polygon || space.polygon.length < 3) &&
+      (stUpper.includes('DOOR') || stUpper === 'PASSAGE');
+    if (isDoorNode) {
+      const conn = (state.connections || []).find(c => c.door_id === space.id);
+      if (conn) {
+        const fromId = conn.from_id || conn.from_space_id || conn.from;
+        const toId = conn.to_id || conn.to_space_id || conn.to;
+        await api(`/connections/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ door_cx: space.centroid_x, door_cy: space.centroid_y }),
+        });
+        notify(`Moved "${space.display_name || 'door'}"`);
+        if (state.selectedFloorId) await reloadCurrentFloor();
+        exitMoveMode();
+        return;
+      }
     }
 
     const body = { centroid_x: space.centroid_x, centroid_y: space.centroid_y };
