@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File, Form
@@ -183,6 +184,7 @@ async def import_dxf(
     origin_bearing: float = Form(0.0),
     layer_mapping: Optional[str] = Form(None),
     dry_run: bool = Form(False),
+    enable_polygonize: bool = Form(True),
     db: Database = Depends(get_db),
     principal: Principal = Depends(require_role("editor")),
 ):
@@ -217,7 +219,11 @@ async def import_dxf(
         raise HTTPException(status_code=422, detail=str(exc))
 
     try:
-        schema_dict = DxfImportService().parse(
+        # Parse is CPU-bound (ezdxf, shapely). Run on a worker thread so
+        # the FastAPI event loop stays responsive — otherwise the reverse
+        # proxy times out and returns 502 on large drawings.
+        schema_dict = await asyncio.to_thread(
+            DxfImportService().parse,
             file_bytes,
             file.filename or "upload.dxf",
             campus_id=campus_id,
@@ -233,6 +239,7 @@ async def import_dxf(
             origin_lng=origin_lng,
             origin_bearing=origin_bearing,
             layer_mapping=layer_overrides,
+            enable_polygonize=enable_polygonize,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=415, detail=str(exc))
@@ -287,8 +294,10 @@ async def import_dxf(
 
     from services.audit_service import write_audit_log
     try:
-        result = ImportService(db).import_map(schema)
-        GdsService(db).refresh_projection()
+        # Neo4j writes + GDS refresh are also blocking; thread them too so
+        # the async route never holds the event loop while the DB works.
+        result = await asyncio.to_thread(ImportService(db).import_map, schema)
+        await asyncio.to_thread(GdsService(db).refresh_projection)
         write_audit_log(
             action="import_dxf",
             success=True,

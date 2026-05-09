@@ -20,51 +20,194 @@ from shapely.ops import polygonize, unary_union
 import math
 
 
-_DEFAULT_LAYER_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
-    ("ROOM_OFFICE", ("OFFICE", "OFC")),
-    ("ROOM_CLASSROOM", ("CLASSROOM", "CLASS", "LECTURE")),
-    ("ROOM_LECTURE_HALL", ("AUDITORIUM", "AUDITORIA")),
-    ("ROOM_LAB", ("LAB", "LABORATORY")),
-    ("ROOM_MEETING", ("MEETING", "CONF", "CONFERENCE", "BOARDROOM")),
-    ("RESTROOM", ("REST", "WC", "TOILET", "BATH", "LAVATORY")),
-    ("CORRIDOR", ("CORRIDOR", "HALL", "HALLWAY", "PASSAGE")),
-    ("STAIRCASE", ("STAIR",)),
-    ("ELEVATOR", ("ELEV", "LIFT")),
-    ("ENTRANCE", ("ENTRANCE", "ENTRY", "LOBBY", "VESTIBULE")),
-    ("CAFETERIA", ("CAFE", "CAFETERIA", "KITCHEN", "DINING")),
-    ("LIBRARY", ("LIBRARY",)),
+# Label keyword patterns: SpaceType -> keywords. Order matters — entries
+# higher up are checked first (e.g. RESTROOM_ACCESSIBLE before RESTROOM).
+# Within each entry, the per-token resolution priority is enforced by
+# _PATTERN_INDEX which sorts by descending pattern length.
+_LABEL_TYPE_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    ("RESTROOM_ACCESSIBLE", ("HC", "HANDICAP")),
+    ("RESTROOM", ("WC", "TOILET", "TOILETTER", "BAD", "BATH", "DAMER",
+                  "HERRER", "DAME", "PUSLERUM", "LAVATORY")),
+    ("ROOM_LAB", ("LABORATORIUM", "LABORATORIE", "LABORATORY", "WORKSHOP",
+                  "VÆRKSTED", "VAERKSTED", "AUDIO", "MEDIA", "LAB")),
+    ("ROOM_UTILITY", ("TEKNIK", "RENG", "RENGØRING", "KRYDSFELT", "TAVLE",
+                      "EL-RUM", "VENTILATION", "INSTALLATION", "SERVERRUM",
+                      "FORDELER", "MASKINRUM", "PUMPERUM", "UTILITY")),
+    ("ROOM_STORAGE", ("LAGER", "STORAGE", "DEPOT", "ARKIV", "ARKIVRUM",
+                      "REDSKAB", "MATERIEL", "GARDEROBE", "CYKEL")),
+    ("ROOM_LECTURE_HALL", ("AUDITORIUM", "AUDITORIA", "AUDITORIE",
+                           "FORELÆSNING", "FORELAESNING", "AUD")),
+    ("ROOM_CLASSROOM", ("SEMINARRUM", "SEMINAR", "KLASSE", "CLASSROOM",
+                        "UNDERVISNING", "GRUPPERUM", "STUDIE")),
+    ("ROOM_MEETING", ("MØDE", "MOEDE", "MEETING", "KONFERENCE",
+                      "CONFERENCE", "BOARDROOM")),
+    ("ROOM_OFFICE", ("KONTOR", "OFFICE", "OFC", "ARBEJDSRUM", "TEAMRUM")),
+    ("LOBBY", ("FORRUM", "FOYER", "LOBBY", "VESTIBULE", "SLUSE")),
+    ("CORRIDOR", ("GANGAREAL", "TVÆRGANG", "GANG", "CORRIDOR", "HALLWAY",
+                  "PASSAGE", "HALL")),
+    ("ENTRANCE", ("HOVEDINDGANG", "BAGINDGANG", "INDGANGSPARTI", "INDGANG",
+                  "ENTRANCE", "ENTRY")),
+    ("CAFETERIA", ("KANTINE", "CAFETERIA", "KITCHEN", "DINING", "FROKOSTRUM")),
+    ("CAFE", ("CAFE", "CAFÉ", "PAUSEZONE", "TEKØKKEN", "TEKOEKKEN")),
+    ("RECEPTION", ("RECEPTION", "INFO")),
+    ("STAIRCASE", ("TRAPPEHUS", "NØDTRAPPE", "STAIR", "TRAPPE")),
+    ("ELEVATOR", ("ELEVATOR", "ELEV", "LIFT")),
+    ("LIBRARY", ("BIBLIOTEK", "LIBRARY")),
     ("SHOP", ("SHOP", "STORE", "RETAIL")),
 ]
-_MIN_ROOM_AREA = 0.5
+
+# Flat (pattern, space_type) list sorted by descending pattern length so
+# SEMINARRUM matches before SEMINAR, GRUPPERUM before GRUPPE, etc.
+_PATTERN_INDEX: list[tuple[str, str]] = sorted(
+    [(p, t) for t, patterns in _LABEL_TYPE_PATTERNS for p in patterns],
+    key=lambda kv: len(kv[0]),
+    reverse=True,
+)
+
+_NAVIGABLE_TYPES = frozenset({
+    "CORRIDOR", "LOBBY", "ENTRANCE", "STAIRCASE", "ELEVATOR",
+    "RECEPTION", "PASSAGE",
+})
+
+# DXF $INSUNITS code -> meters per unit (subset; from DXF spec).
+_INSUNITS_TO_METERS: dict[int, float] = {
+    1: 0.0254,   # inches
+    2: 0.3048,   # feet
+    4: 0.001,    # millimeters
+    5: 0.01,     # centimeters
+    6: 1.0,      # meters
+    14: 1e-7,    # decimicrons
+    21: 0.1,     # decimeters
+}
+
+_MIN_ROOM_AREA = 0.5                  # raw-unit early degenerate-polygon filter
+_MIN_ROOM_AREA_M2 = 1.5               # post-scaling
+_MAX_ROOM_AREA_M2 = 500.0             # rooms larger than this are envelopes/courtyards
+_LABEL_BOUNDARY_BUFFER_M = 0.6        # narrow tolerance for "label on the wall"
+_NEAREST_LABEL_FALLBACK_M = 3.0       # leader-line / external-label adoption (after primary attach fails)
+_SMALL_UNLABELED_DROP_AREA_M2 = 5.0   # unlabeled polys smaller than this are dropped
+_MIN_ROOM_AREA_FOR_LABEL_M2 = 2.0     # below this, a polygon won't steal a contained label
+_DOOR_ARC_RADIUS_RANGE_M = (0.4, 1.5)
+_DOOR_ARC_SWEEP_DEG = (45.0, 130.0)
+_DOOR_CONNECTION_THRESHOLD_M = 0.4
+
 _LAT_RANGE = (-90.0, 90.0)
 _LNG_RANGE = (-180.0, 180.0)
 _POLYGONIZE_SNAP_TOLERANCE = 1e-3
 _OUTER_AREA_RATIO = 8.0
-_DOOR_CONNECTION_THRESHOLD = 0.5
-#DXF FILE LIMITS
-_MAX_DXF_BYTES = 80 * 1024 * 1024            
-_MAX_FINAL_ROOMS = 8000                
-_MAX_TEXT_ENTITIES = 5000                     
+# DXF FILE LIMITS
+_MAX_DXF_BYTES = 80 * 1024 * 1024
+_MAX_FINAL_ROOMS = 8000
+_MAX_TEXT_ENTITIES = 5000
+
+
+def _classify_label(text: Optional[str]) -> tuple[str, float]:
+    """Match a label / layer name against `_PATTERN_INDEX` and return
+    `(space_type, confidence)`.
+
+    Whole-word match for short keywords (<= 3 chars) so abbreviations
+    like "HC" or "WC" do not substring-match unrelated tokens; substring
+    match for longer keywords. Patterns are length-sorted so SEMINARRUM
+    wins over SEMINAR, GRUPPERUM over GRUPPE, etc.
+    """
+    if not text:
+        return "ROOM_GENERIC", 0.4
+    upper = text.upper()
+    for pattern, space_type in _PATTERN_INDEX:
+        if len(pattern) <= 3:
+            if re.search(rf"\b{re.escape(pattern)}\b", upper):
+                return space_type, 0.85
+        elif pattern in upper:
+            return space_type, 0.9
+    return "ROOM_GENERIC", 0.4
 
 
 def _classify_layer(
-    layer_name: str,
+    layer_name: Optional[str],
     overrides: Optional[dict[str, str]] = None,
 ) -> str:
-    """Map a DXF layer name to a SpaceType. The optional `overrides`
-    mapping wins outright (exact case-insensitive match); the default
-    pattern list is the fallback."""
-    name = (layer_name or "").strip()
-    if overrides:
+    """Legacy shim: classifies by layer name only (no label).
+    Retained for callers that only have a layer name handy.
+    """
+    if overrides and layer_name:
         for k, v in overrides.items():
-            if k and k.upper() == name.upper():
+            if k and k.upper() == layer_name.upper():
                 return v
-    upper = name.upper()
-    for space_type, patterns in _DEFAULT_LAYER_PATTERNS:
-        for p in patterns:
-            if p in upper:
-                return space_type
-    return "ROOM_GENERIC"
+    space_type, _ = _classify_label(layer_name)
+    return space_type
+
+
+def _resolve_unit_scale(
+    doc: Drawing,
+    polygon_bbox_span: Optional[float] = None,
+) -> tuple[float, list[str]]:
+    """Return `(meters_per_unit, warnings)`.
+
+    Reads `$INSUNITS` from the DXF header. When the unit code is 0
+    (unitless), falls back to a bounding-box heuristic — drawings whose
+    extent is in the thousands are almost certainly mm-based.
+    """
+    warnings: list[str] = []
+    code = 0
+    try:
+        header = getattr(doc, "header", None)
+        if header is not None:
+            code = int(header.get("$INSUNITS", 0))
+    except Exception:
+        code = 0
+
+    scale = _INSUNITS_TO_METERS.get(code)
+    if scale is not None:
+        return scale, [f"DXF $INSUNITS={code} -> {scale} m/unit"]
+
+    if polygon_bbox_span is None or polygon_bbox_span <= 0:
+        warnings.append(
+            "DXF $INSUNITS=0 (unitless) and no polygon bbox available; assuming meters."
+        )
+        return 1.0, warnings
+    if polygon_bbox_span > 5000:
+        warnings.append(
+            f"DXF $INSUNITS=0; bbox span {polygon_bbox_span:.0f} suggests millimeters (x0.001)."
+        )
+        return 0.001, warnings
+    if polygon_bbox_span > 200:
+        warnings.append(
+            f"DXF $INSUNITS=0; bbox span {polygon_bbox_span:.0f} suggests centimeters (x0.01)."
+        )
+        return 0.01, warnings
+    warnings.append(
+        f"DXF $INSUNITS=0; bbox span {polygon_bbox_span:.0f} suggests meters (x1.0)."
+    )
+    return 1.0, warnings
+
+
+def _scale_rooms(rooms: list[dict], scale_m: float) -> None:
+    """Scale all room polygons in place from raw units to meters."""
+    if scale_m == 1.0:
+        return
+    for r in rooms:
+        poly = r.get("polygon") or []
+        r["polygon"] = [(float(x) * scale_m, float(y) * scale_m) for x, y in poly]
+
+
+def _scale_texts(texts: list[dict], scale_m: float) -> None:
+    """Scale text insertion points in place from raw units to meters."""
+    if scale_m == 1.0:
+        return
+    for t in texts:
+        try:
+            t["x"] = float(t["x"]) * scale_m
+            t["y"] = float(t["y"]) * scale_m
+        except Exception:
+            continue
+
+
+def _polygon_area_m2(coords) -> float:
+    """Best-effort polygon area; returns 0 on construction failure."""
+    try:
+        return float(Polygon(coords).area)
+    except Exception:
+        return 0.0
 
 
 def _polygon_from_lwpolyline(entity) -> Optional[list[tuple[float, float]]]:
@@ -256,47 +399,66 @@ def _snap_and_dedupe_segments(segments: list[LineString], snap_tol: float) -> li
     return out
 
 
-def _polygonize_from_doc(doc: Drawing) -> list[dict]:
+def _polygonize_from_doc(
+    doc: Drawing,
+    *,
+    snap_tolerance_raw: Optional[float] = None,
+    max_segments: int = 200_000,
+) -> tuple[list[dict], list[str]]:
     """Polygonize by collecting segments (recursing into INSERTs),
-    snapping endpoints conservatively, merging, and running
-    `shapely.ops.polygonize`.
-    Returns list of {layer, polygon, source} dicts.
+    snapping endpoints, merging, and running `shapely.ops.polygonize`.
+    Returns `(rooms, warnings)`.
+
+    `snap_tolerance_raw` is the endpoint-snapping tolerance in raw DXF
+    units. When unset, falls back to the historical bbox-based heuristic
+    (which is too tight for most CAD floor plans). Pass an explicit
+    physical-distance value (e.g. 20mm equivalent) for reliable noding.
     """
+    warnings: list[str] = []
     try:
         msp = doc.modelspace()
     except Exception:
-        return []
+        return [], warnings
 
     raw_segments = _collect_segments_from_entities(msp)
     if not raw_segments:
-        return []
+        return [], warnings
+    if len(raw_segments) > max_segments:
+        warnings.append(
+            f"polygonize: segment count {len(raw_segments)} exceeds cap {max_segments}; skipped."
+        )
+        return [], warnings
 
-    try:
-        xs = [c for s in raw_segments for c in (s.coords[0][0], s.coords[-1][0])]
-        ys = [c for s in raw_segments for c in (s.coords[0][1], s.coords[-1][1])]
-        if xs and ys:
-            dx = max(xs) - min(xs)
-            dy = max(ys) - min(ys)
-            diag = math.hypot(dx, dy)
-            snap_tol = max(_POLYGONIZE_SNAP_TOLERANCE, diag * 1e-6)
-        else:
+    if snap_tolerance_raw is not None:
+        snap_tol = float(snap_tolerance_raw)
+    else:
+        try:
+            xs = [c for s in raw_segments for c in (s.coords[0][0], s.coords[-1][0])]
+            ys = [c for s in raw_segments for c in (s.coords[0][1], s.coords[-1][1])]
+            if xs and ys:
+                dx = max(xs) - min(xs)
+                dy = max(ys) - min(ys)
+                diag = math.hypot(dx, dy)
+                snap_tol = max(_POLYGONIZE_SNAP_TOLERANCE, diag * 1e-6)
+            else:
+                snap_tol = _POLYGONIZE_SNAP_TOLERANCE
+        except Exception:
             snap_tol = _POLYGONIZE_SNAP_TOLERANCE
-    except Exception:
-        snap_tol = _POLYGONIZE_SNAP_TOLERANCE
 
     segs = _snap_and_dedupe_segments(raw_segments, snap_tol)
     if not segs:
-        return []
+        return [], warnings
 
     try:
         merged = unary_union(segs)
         polys = list(polygonize(merged))
-    except Exception:
-        return []
+    except Exception as exc:
+        warnings.append(f"polygonize: shapely failed: {exc}")
+        return [], warnings
 
     polys = [p for p in polys if not p.is_empty and p.area >= _MIN_ROOM_AREA]
     if not polys:
-        return []
+        return [], warnings
 
     areas = sorted([p.area for p in polys])
     if len(areas) >= 2:
@@ -312,7 +474,7 @@ def _polygonize_from_doc(doc: Drawing) -> list[dict]:
     for poly in polys:
         coords = list(poly.exterior.coords)
         out.append({"layer": "", "polygon": coords, "source": "polygonized_linework"})
-    return out
+    return out, warnings
 
 
 def _polygonize_from_parsed(parsed: dict) -> list[dict]:
@@ -574,6 +736,364 @@ def _attach_labels(rooms: list[dict], texts: list[dict]) -> None:
             r["metadata"] = meta
 
 
+def _pick_label(labels: list[dict]) -> dict:
+    """Pick the most informative label: prefer one with digits (room
+    ID), else the shortest non-trivial string, else any label."""
+    for lab in labels:
+        if re.search(r"\d", lab.get("text", "") or ""):
+            return lab
+    nontrivial = [lab for lab in labels if (lab.get("text") or "").strip()]
+    if nontrivial:
+        return min(nontrivial, key=lambda x: len(x.get("text") or ""))
+    return labels[0]
+
+
+def _filter_by_labels(
+    rooms: list[dict],
+    texts: list[dict],
+    *,
+    boundary_buffer_m: float = _LABEL_BOUNDARY_BUFFER_M,
+    nearest_fallback_m: float = _NEAREST_LABEL_FALLBACK_M,
+    small_drop_area_m2: float = _SMALL_UNLABELED_DROP_AREA_M2,
+    min_room_area_for_label_m2: float = _MIN_ROOM_AREA_FOR_LABEL_M2,
+) -> tuple[list[dict], list[str], dict[str, int]]:
+    """Attach labels to rooms and drop unlabeled-and-small polygons.
+
+    The matching strategy works label-first (each label belongs to at
+    most one polygon) and prefers small but real rooms over wall slivers
+    by enforcing a minimum-area gate on label-claiming polygons.
+
+    1. For each label, list polygons that either contain it or sit
+       within `boundary_buffer_m` of the point.
+    2. Among those, prefer ones with area >= `min_room_area_for_label_m2`
+       (skips wall slivers); pick the smallest qualifier (innermost room).
+    3. If none qualify but some are present below the area gate, attach
+       to the largest of those (last resort).
+    4. Polygons that ended up without any label are kept only if their
+       area >= `small_drop_area_m2`. Unattached labels then attach to the
+       nearest still-unlabeled polygon within `nearest_fallback_m` of
+       the centroid (rescues leader-line / external labels).
+
+    Returns `(kept_rooms, warnings, stats)`.
+    """
+    warnings: list[str] = []
+    stats = {
+        "dropped_unlabeled_small": 0,
+        "kept_with_external_label": 0,
+        "kept_unlabeled_large": 0,
+        "rooms_with_contained_label": 0,
+    }
+    if not rooms:
+        return [], warnings, stats
+
+    polys: list[Optional[Polygon]] = []
+    areas: list[float] = []
+    for r in rooms:
+        try:
+            p = Polygon(r["polygon"])
+            if not p.is_valid:
+                p = None
+        except Exception:
+            p = None
+        polys.append(p)
+        areas.append(p.area if p is not None else 0.0)
+
+    valid_indexed = [(i, p) for i, p in enumerate(polys) if p is not None]
+    if not valid_indexed:
+        return [], ["No valid polygons remain for label attachment."], stats
+
+    try:
+        from shapely.strtree import STRtree
+        tree = STRtree([p for _, p in valid_indexed])
+        idx_by_id = {id(p): i for i, p in valid_indexed}
+        use_tree = True
+    except Exception:
+        tree = None
+        idx_by_id = {}
+        use_tree = False
+
+    labels_per_room: dict[int, list[dict]] = {i: [] for i, _ in valid_indexed}
+    unattached_labels: list[dict] = []
+
+    for t in texts:
+        try:
+            pt = Point(float(t["x"]), float(t["y"]))
+        except Exception:
+            continue
+
+        # Find candidates: polygons that contain the point or are near it.
+        candidates: list[tuple[int, Polygon, float, bool]] = []  # (idx, poly, distance, strictly_contains)
+        if use_tree:
+            try:
+                hits = tree.query(pt.buffer(boundary_buffer_m))
+                cand_iter: list[tuple[int, Polygon]] = []
+                for cand in hits:
+                    try:
+                        ci = int(cand)
+                        if 0 <= ci < len(valid_indexed):
+                            cand_iter.append(valid_indexed[ci])
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                    i = idx_by_id.get(id(cand))
+                    if i is not None:
+                        cand_iter.append((i, cand))
+            except Exception:
+                cand_iter = list(valid_indexed)
+        else:
+            cand_iter = list(valid_indexed)
+
+        for i, poly in cand_iter:
+            try:
+                contains = poly.contains(pt)
+                d = 0.0 if contains else poly.distance(pt)
+            except Exception:
+                continue
+            if contains or d <= boundary_buffer_m:
+                candidates.append((i, poly, d, contains))
+
+        if not candidates:
+            unattached_labels.append(t)
+            continue
+
+        # Prefer strictly-contained candidates over near-boundary ones.
+        contained = [c for c in candidates if c[3]]
+        pool = contained or candidates
+
+        # Within the pool, prefer polygons whose area clears the
+        # min_room_area gate. Among qualifiers, pick the smallest
+        # (innermost room). If none clear the gate, fall back to the
+        # largest sub-gate polygon (least bad).
+        qualifying = [c for c in pool if areas[c[0]] >= min_room_area_for_label_m2]
+        if qualifying:
+            chosen_idx = min(qualifying, key=lambda c: areas[c[0]])[0]
+        else:
+            chosen_idx = max(pool, key=lambda c: areas[c[0]])[0]
+
+        labels_per_room[chosen_idx].append(t)
+
+    for i in labels_per_room:
+        if labels_per_room[i]:
+            stats["rooms_with_contained_label"] += 1
+
+    # Pass 2: nearest-external fallback for still-unlabeled rooms.
+    for i, poly in valid_indexed:
+        if labels_per_room[i]:
+            continue
+        if areas[i] < min_room_area_for_label_m2:
+            continue  # don't even try to attach external labels to slivers
+        cx, cy = poly.centroid.x, poly.centroid.y
+        best_d = nearest_fallback_m
+        best_t: Optional[dict] = None
+        for t in unattached_labels:
+            try:
+                d = math.hypot(float(t["x"]) - cx, float(t["y"]) - cy)
+            except Exception:
+                continue
+            if d < best_d:
+                best_d = d
+                best_t = t
+        if best_t is not None:
+            labels_per_room[i].append({**best_t, "_source": "nearest_external"})
+            stats["kept_with_external_label"] += 1
+
+    kept: list[dict] = []
+    stats["dropped_unlabeled_wall_like"] = 0
+    for i, p in valid_indexed:
+        labels = labels_per_room.get(i) or []
+        rec = dict(rooms[i])
+        meta = dict(rec.get("metadata") or {})
+        if labels:
+            chosen = _pick_label(labels)
+            rec["label"] = chosen.get("text")
+            meta["label_source"] = chosen.get("_source", "contained")
+            extras = [lab.get("text") for lab in labels if lab is not chosen]
+            if extras:
+                meta["extra_labels"] = extras
+        else:
+            if areas[i] < small_drop_area_m2:
+                stats["dropped_unlabeled_small"] += 1
+                continue
+            # Wall-like: high bbox aspect ratio. Drop unlabeled polygons
+            # where the bbox is more than 6x longer than wide (typical for
+            # corridor walls drawn as long thin rectangles).
+            try:
+                minx, miny, maxx, maxy = p.bounds
+                w = maxx - minx
+                h = maxy - miny
+                long_dim = max(w, h)
+                short_dim = max(min(w, h), 1e-6)
+                aspect = long_dim / short_dim
+            except Exception:
+                aspect = 1.0
+            if aspect > 6.0:
+                stats["dropped_unlabeled_wall_like"] += 1
+                continue
+            stats["kept_unlabeled_large"] += 1
+            meta["label_source"] = "unlabeled"
+        rec["metadata"] = meta
+        kept.append(rec)
+
+    if stats["dropped_unlabeled_small"]:
+        warnings.append(
+            f"Dropped {stats['dropped_unlabeled_small']} unlabeled polygons smaller than "
+            f"{small_drop_area_m2:.1f} m^2 (likely furniture/fixtures)."
+        )
+    if stats["kept_with_external_label"]:
+        warnings.append(
+            f"{stats['kept_with_external_label']} rooms attached labels via "
+            f"nearest-external fallback (within {nearest_fallback_m:.1f} m of centroid)."
+        )
+    if stats["kept_unlabeled_large"]:
+        warnings.append(
+            f"{stats['kept_unlabeled_large']} unlabeled polygons kept on the strength of "
+            f"area >= {small_drop_area_m2:.1f} m^2."
+        )
+    return kept, warnings, stats
+
+
+def _drop_outer_envelopes(rooms: list[dict]) -> tuple[list[dict], int]:
+    """Drop polygons that fully contain three or more other accepted
+    polygons — these are whole-floor outlines, not rooms.
+    Returns `(kept, dropped_count)`.
+    """
+    if len(rooms) < 4:
+        return rooms, 0
+    shapes: list[Optional[Polygon]] = []
+    for r in rooms:
+        try:
+            shapes.append(Polygon(r["polygon"]))
+        except Exception:
+            shapes.append(None)
+    drop: set[int] = set()
+    for i, big in enumerate(shapes):
+        if big is None or i in drop:
+            continue
+        contained = 0
+        for j, s in enumerate(shapes):
+            if i == j or s is None or j in drop:
+                continue
+            try:
+                if big.contains(s):
+                    contained += 1
+                    if contained >= 3:
+                        break
+            except Exception:
+                continue
+        if contained >= 3:
+            drop.add(i)
+    if not drop:
+        return rooms, 0
+    return [r for i, r in enumerate(rooms) if i not in drop], len(drop)
+
+
+def _merge_id_type_pairs(
+    spaces: list[dict],
+    *,
+    pairing_radius_m: float = 5.0,
+) -> tuple[list[dict], dict[str, str], int]:
+    """Merge pairs of spaces that represent one physical room.
+
+    In CAD floor plans the room ID label (e.g. "2.0.041") and the room
+    type label (e.g. "Audio Workshop") are often placed several meters
+    apart inside the same room. After polygonize + label attachment,
+    each label may end up on a different polygon. This step identifies
+    pairs whose centroids are within `pairing_radius_m` and where one
+    space carries a numeric `short_name` while the other does not, then
+    folds the type-bearing space into the ID-bearing one.
+
+    Returns `(merged_spaces, id_remap, merge_count)` where `id_remap`
+    maps dropped-space-ids to surviving-space-ids so the caller can
+    rewrite connections.
+    """
+    if not spaces:
+        return spaces, {}, 0
+
+    id_spaces: list[dict] = []   # short_name has digits
+    type_spaces: list[dict] = []  # purely alphabetic name
+    other: list[dict] = []
+    for s in spaces:
+        sn = s.get("short_name")
+        name = s.get("display_name") or ""
+        if sn and any(c.isdigit() for c in sn):
+            id_spaces.append(s)
+        elif name and not name.startswith("Room ") and any(c.isalpha() for c in name) and not any(c.isdigit() for c in name):
+            type_spaces.append(s)
+        else:
+            other.append(s)
+
+    if not id_spaces or not type_spaces:
+        return spaces, {}, 0
+
+    id_remap: dict[str, str] = {}
+    consumed: set[int] = set()
+    surviving = list(id_spaces)
+
+    for ti, t_space in enumerate(type_spaces):
+        tx = t_space.get("centroid_x")
+        ty = t_space.get("centroid_y")
+        if tx is None or ty is None:
+            continue
+        best_id_idx: Optional[int] = None
+        best_d = pairing_radius_m
+        for ii, i_space in enumerate(surviving):
+            ix = i_space.get("centroid_x")
+            iy = i_space.get("centroid_y")
+            if ix is None or iy is None:
+                continue
+            d = math.hypot(tx - ix, ty - iy)
+            if d < best_d:
+                best_d = d
+                best_id_idx = ii
+        if best_id_idx is None:
+            continue
+
+        target = surviving[best_id_idx]
+        consumed.add(ti)
+        id_remap[t_space["id"]] = target["id"]
+
+        # Promote the type-name's classification if it's more specific.
+        if target.get("space_type") == "ROOM_GENERIC" and t_space.get("space_type") != "ROOM_GENERIC":
+            target["space_type"] = t_space["space_type"]
+            target["is_navigable"] = t_space.get("is_navigable", target.get("is_navigable", False))
+
+        # Append the type-name and any extras to the survivor's metadata.
+        meta = dict(target.get("metadata") or {})
+        extras = list(meta.get("extra_labels") or [])
+        if t_space.get("display_name"):
+            extras.append(t_space["display_name"])
+        for e in (t_space.get("metadata") or {}).get("extra_labels") or []:
+            extras.append(e)
+        # dedupe while preserving order
+        seen = set()
+        deduped: list[str] = []
+        for e in extras:
+            if e and e not in seen:
+                seen.add(e)
+                deduped.append(e)
+        if deduped:
+            meta["extra_labels"] = deduped
+        meta["merged_from"] = (meta.get("merged_from") or []) + [t_space["id"]]
+        target["metadata"] = meta
+
+        # Use the larger polygon if the type-space's polygon is bigger.
+        try:
+            if t_space.get("area_m2") and target.get("area_m2"):
+                if t_space["area_m2"] > target["area_m2"]:
+                    target["polygon"] = t_space["polygon"]
+                    target["centroid_x"] = t_space.get("centroid_x")
+                    target["centroid_y"] = t_space.get("centroid_y")
+                    target["area_m2"] = t_space["area_m2"]
+                    target["width_m"] = t_space.get("width_m")
+                    target["length_m"] = t_space.get("length_m")
+        except Exception:
+            pass
+
+    surviving_type = [s for ti, s in enumerate(type_spaces) if ti not in consumed]
+    merged = [*surviving, *surviving_type, *other]
+    return merged, id_remap, len(consumed)
+
+
 def _collect_diagnostics_from_doc(doc: Drawing) -> dict:
     msp = doc.modelspace()
     entity_counts = Counter()
@@ -667,35 +1187,32 @@ def _collect_diagnostics_from_parsed(parsed: dict) -> dict:
     }
 
 
-def _classify_space(layer_name: Optional[str], label: Optional[str], tags: list[str], overrides: Optional[dict[str, str]] = None) -> tuple[str, bool, float]:
-    """Classify a space using: overrides -> layer -> label -> tags -> fallback.
-    Returns (space_type, is_navigable, confidence)
+def _classify_space(
+    layer_name: Optional[str],
+    label: Optional[str],
+    overrides: Optional[dict[str, str]] = None,
+) -> tuple[str, bool, float]:
+    """Classify a space label-first, then layer-fallback.
+
+    Priority: explicit override on layer name -> label keyword match ->
+    layer keyword match -> ROOM_GENERIC. Returns
+    `(space_type, is_navigable, confidence)`.
     """
     if overrides and layer_name:
         for k, v in overrides.items():
-            if k and layer_name and k.upper() == layer_name.upper():
-                return v, (v in ("CORRIDOR", "ENTRANCE", "STAIRCASE", "ELEVATOR")), 0.95
+            if k and k.upper() == layer_name.upper():
+                return v, (v in _NAVIGABLE_TYPES), 0.95
+
+    label_type, label_conf = _classify_label(label)
+    if label_type != "ROOM_GENERIC":
+        return label_type, (label_type in _NAVIGABLE_TYPES), label_conf
 
     if layer_name:
-        t = _classify_layer(layer_name, overrides=overrides)
-        if t != "ROOM_GENERIC":
-            return t, (t in ("CORRIDOR", "ENTRANCE", "STAIRCASE", "ELEVATOR")), 0.9
+        layer_type, _ = _classify_label(layer_name)
+        if layer_type != "ROOM_GENERIC":
+            return layer_type, (layer_type in _NAVIGABLE_TYPES), 0.6
 
-    # Try label-based patterns
-    txt = (label or "").upper()
-    for space_type, patterns in _DEFAULT_LAYER_PATTERNS:
-        for p in patterns:
-            if p in txt:
-                return space_type, (space_type in ("CORRIDOR", "ENTRANCE", "STAIRCASE", "ELEVATOR")), 0.8
-
-    # Tags
-    for tag in tags:
-        for space_type, patterns in _DEFAULT_LAYER_PATTERNS:
-            for p in patterns:
-                if p in tag.upper():
-                    return space_type, (space_type in ("CORRIDOR", "ENTRANCE", "STAIRCASE", "ELEVATOR")), 0.75
-
-    return "ROOM_GENERIC", False, 0.5
+    return "ROOM_GENERIC", False, 0.4
 
 
 def _extract_hatch_polygons(doc: Drawing) -> tuple[list[dict], list[str]]:
@@ -761,99 +1278,201 @@ def _extract_hatch_polygons(doc: Drawing) -> tuple[list[dict], list[str]]:
     return out, warnings
 
 
-def _infer_connections(spaces: list[dict], doc: Optional[Drawing]) -> tuple[list[dict], list[str]]:
-    """Conservative door-based connection inference.
-    Scans the document for door-like layers/entities and attempts to
-    associate door points with two nearby spaces.
-    Returns (connections, warnings).
-    """
-    warnings: list[str] = []
-    connections: list[dict] = []
-    if not doc:
-        return connections, warnings
+def _arc_is_door_candidate(radius_m: float, sweep_deg: float) -> bool:
+    """A door swing has a characteristic geometry: leaf-width radius
+    (0.4-1.5 m) and a 45-130 deg arc sweep. Round tables, decorative
+    fillets and very long curves are filtered out."""
+    if not (_DOOR_ARC_RADIUS_RANGE_M[0] <= radius_m <= _DOOR_ARC_RADIUS_RANGE_M[1]):
+        return False
+    return _DOOR_ARC_SWEEP_DEG[0] <= sweep_deg <= _DOOR_ARC_SWEEP_DEG[1]
 
+
+def _collect_door_candidates(
+    doc: Drawing,
+    scale_m: float,
+) -> tuple[list[tuple[tuple[float, float], str]], int]:
+    """Collect plausible door points already converted to meters.
+
+    Returns `(candidates, arc_count)` where `candidates` is a list of
+    `((x_m, y_m), source)` and `source` is "arc_geometry" or
+    "door_layer". `arc_count` is the number of ARC entities that passed
+    the door-shape filter (useful in diagnostics).
+    """
+    out: list[tuple[tuple[float, float], str]] = []
+    arc_hits = 0
     try:
         msp = doc.modelspace()
     except Exception:
-        return connections, warnings
+        return out, 0
 
-    door_layers = set()
-    door_points: list[tuple[float, float]] = []
-    # Collect potential door geometry
     for e in msp:
         try:
-            layer = (getattr(e.dxf, "layer", "") or "").upper()
-            name = (getattr(e, "name", None) or getattr(e.dxf, "name", None) or "").upper() if hasattr(e, "dxftype") else ""
             t = e.dxftype()
         except Exception:
             continue
-        if "DOOR" in layer or "DOOR" in name or any(k in layer for k in ("DØR", "DR", "A-DOOR")):
-            door_layers.add(layer)
-            # Get representative point
+
+        layer = (getattr(e.dxf, "layer", "") or "").upper()
+        layer_door = (
+            "DOOR" in layer
+            or "DØR" in layer
+            or layer in {"DR", "A-DOOR"}
+        )
+
+        if t == "ARC":
+            try:
+                radius_m = float(e.dxf.radius) * scale_m
+                start = float(e.dxf.start_angle)
+                end = float(e.dxf.end_angle)
+                sweep = abs(end - start)
+                if sweep > 360:
+                    sweep = sweep % 360
+                if sweep > 180:
+                    sweep = 360 - sweep
+                if _arc_is_door_candidate(radius_m, sweep):
+                    c = e.dxf.center
+                    cx = float(c[0]) * scale_m
+                    cy = float(c[1]) * scale_m
+                    mid_rad = math.radians((start + end) / 2.0)
+                    mx = cx + radius_m * math.cos(mid_rad) * 0.5
+                    my = cy + radius_m * math.sin(mid_rad) * 0.5
+                    out.append(((mx, my), "arc_geometry"))
+                    arc_hits += 1
+            except Exception:
+                continue
+        elif layer_door:
             try:
                 if t == "INSERT":
                     pt = getattr(e.dxf, "insert", None)
                     if pt:
-                        door_points.append((float(pt[0]), float(pt[1])))
+                        out.append((
+                            (float(pt[0]) * scale_m, float(pt[1]) * scale_m),
+                            "door_layer",
+                        ))
                 elif t == "LINE":
                     s = e.dxf.start
                     ed = e.dxf.end
-                    door_points.append(((float(s[0]) + float(ed[0])) / 2.0, (float(s[1]) + float(ed[1])) / 2.0))
+                    mx = (float(s[0]) + float(ed[0])) / 2.0 * scale_m
+                    my = (float(s[1]) + float(ed[1])) / 2.0 * scale_m
+                    out.append(((mx, my), "door_layer"))
                 elif t == "CIRCLE":
                     c = e.dxf.center
-                    door_points.append((float(c[0]), float(c[1])))
-                elif t == "ARC":
-                    c = e.dxf.center
-                    s_ang = float(e.dxf.start_angle)
-                    e_ang = float(e.dxf.end_angle)
-                    mid = math.radians((s_ang + e_ang) / 2.0)
-                    r = float(e.dxf.radius)
-                    door_points.append((float(c[0]) + r * math.cos(mid), float(c[1]) + r * math.sin(mid)))
+                    out.append((
+                        (float(c[0]) * scale_m, float(c[1]) * scale_m),
+                        "door_layer",
+                    ))
             except Exception:
                 continue
+    return out, arc_hits
 
-    # Build Shapely shapes for spaces
-    shapes = []
+
+def _infer_connections(
+    spaces: list[dict],
+    doc: Optional[Drawing],
+    scale_m: float,
+) -> tuple[list[dict], list[str], int]:
+    """Arc + door-layer hybrid door connection inference.
+
+    A door is inferred when the candidate point is within
+    `_DOOR_CONNECTION_THRESHOLD_M` of two distinct rooms. Geometry has
+    already been scaled to meters, so the threshold is in meters.
+
+    Returns `(connections, warnings, arc_candidate_count)`.
+    """
+    warnings: list[str] = []
+    connections: list[dict] = []
+    if not doc:
+        return connections, warnings, 0
+
+    candidates, arc_hits = _collect_door_candidates(doc, scale_m)
+    if not candidates:
+        warnings.append("No door candidates (no qualifying ARCs and no DOOR layers).")
+        return connections, warnings, arc_hits
+
+    polys: list[tuple[str, Polygon]] = []
     for s in spaces:
         try:
-            poly = Polygon(s["polygon"]) if s.get("polygon") else None
+            p = Polygon(s["polygon"]) if s.get("polygon") else None
+            if p is not None and p.is_valid:
+                polys.append((s["id"], p))
         except Exception:
-            poly = None
-        shapes.append((s.get("id"), poly))
+            continue
+    if len(polys) < 2:
+        return connections, warnings, arc_hits
 
-    for pt in door_points:
-        p = Point(pt)
-        dists = []
-        for sid, poly in shapes:
-            if poly is None:
-                continue
+    use_tree = False
+    tree = None
+    poly_by_id: dict[int, tuple[str, Polygon]] = {}
+    try:
+        from shapely.strtree import STRtree
+        tree = STRtree([p for _, p in polys])
+        poly_by_id = {id(p): (sid, p) for sid, p in polys}
+        use_tree = True
+    except Exception:
+        use_tree = False
+
+    seen: set[tuple[str, str]] = set()
+    for (x, y), source in candidates:
+        pt = Point(x, y)
+        if use_tree:
             try:
-                d = poly.distance(p)
+                hits = tree.query(pt.buffer(1.0))
+                near: list[tuple[str, Polygon]] = []
+                for cand in hits:
+                    try:
+                        ci = int(cand)
+                        if 0 <= ci < len(polys):
+                            near.append(polys[ci])
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                    rec = poly_by_id.get(id(cand))
+                    if rec is not None:
+                        near.append(rec)
+                if not near:
+                    near = polys
             except Exception:
-                d = float("inf")
-            dists.append((sid, d))
-        dists.sort(key=lambda x: x[1])
-        if len(dists) >= 2 and dists[0][1] <= _DOOR_CONNECTION_THRESHOLD and dists[1][1] <= _DOOR_CONNECTION_THRESHOLD:
-            a, b = dists[0][0], dists[1][0]
-            if a != b and not any((c.get("from_space_id") == a and c.get("to_space_id") == b) or (c.get("from_space_id") == b and c.get("to_space_id") == a) for c in connections):
-                connections.append({
-                    "from_space_id": a,
-                    "to_space_id": b,
-                    "connection_type": "DOORWAY",
-                    "is_accessible": True,
-                    "door_type": "STANDARD",
-                    "requires_access_level": "public",
-                    "transition_time_s": 5.0,
-                    "weight_override": None,
-                    "metadata": {"source": "door_geometry"},
-                })
+                near = polys
         else:
-            # low-confidence door point
-            warnings.append(f"Door candidate at {pt} could not be matched to two nearby spaces (nearest distances: {[(d[1]) for d in dists[:2]]})")
+            near = polys
+
+        dists: list[tuple[str, float]] = []
+        for sid, poly in near:
+            try:
+                d = poly.distance(pt)
+            except Exception:
+                continue
+            if d <= _DOOR_CONNECTION_THRESHOLD_M:
+                dists.append((sid, d))
+        if len(dists) < 2:
+            continue
+        dists.sort(key=lambda kv: kv[1])
+        a, b = dists[0][0], dists[1][0]
+        if a == b:
+            continue
+        key = (a, b) if a <= b else (b, a)
+        if key in seen:
+            continue
+        seen.add(key)
+        connections.append({
+            "from_space_id": a,
+            "to_space_id": b,
+            "connection_type": "DOOR",
+            "door_type": "STANDARD",
+            "is_accessible": True,
+            "requires_access_level": None,
+            "transition_time_s": 5.0,
+            "weight_override": None,
+            "door_cx": x,
+            "door_cy": y,
+            "metadata": {"source": source},
+        })
 
     if connections:
-        warnings.append(f"Inferred {len(connections)} door connections from door-layer geometry; please review.")
-    return connections, warnings
+        warnings.append(
+            f"Inferred {len(connections)} door connection(s) from "
+            f"{arc_hits} arc candidate(s) + door layers."
+        )
+    return connections, warnings, arc_hits
 
 
 def _convert_dwg_with_oda(dwg_bytes: bytes) -> bytes:
@@ -1010,6 +1629,7 @@ class DxfImportService:
         origin_lng: Optional[float] = None,
         origin_bearing: float = 0.0,
         layer_mapping: Optional[dict[str, str]] = None,
+        enable_polygonize: bool = False,
     ) -> dict[str, Any]:
         _validate_origin(origin_lat, origin_lng)
 
@@ -1023,7 +1643,7 @@ class DxfImportService:
         log = logging.getLogger("dxf_import")
         t0 = time.monotonic()
         def _stage(label: str, started: float, **extra) -> None:
-            log.warning("[dxf-import] %s took %.2fs %s", label, time.monotonic() - started, extra or "")
+            log.info("[dxf-import] %s took %.2fs %s", label, time.monotonic() - started, extra or "")
 
         ext = Path(filename or "").suffix.lower()
         from_dwg = False
@@ -1074,6 +1694,15 @@ class DxfImportService:
         diagnostics = _collect_diagnostics_from_doc(doc)
         _stage("diagnostics", t)
 
+        # Resolve units up front so the label-seeded polygonize knows how
+        # large its search bbox should be in raw DXF units. For
+        # $INSUNITS=0 (unitless) we get scale=1.0 with a warning; the
+        # post-extraction bbox heuristic refines this if needed.
+        unit_scale, unit_warnings = _resolve_unit_scale(doc, polygon_bbox_span=None)
+        unit_known_from_header = not any(
+            "no polygon bbox" in w or "$INSUNITS=0" in w for w in unit_warnings
+        )
+
         t = time.monotonic()
         raw_rooms = _walk_polygons(doc.modelspace())
         _stage("walk_polygons", t, count=len(raw_rooms))
@@ -1084,22 +1713,42 @@ class DxfImportService:
         if hatch_rooms:
             raw_rooms = [*raw_rooms, *hatch_rooms]
 
-        polygonize_skipped_reason: Optional[str] = None
         t = time.monotonic()
-        try:
-            poly_rooms = _polygonize_from_doc(doc)
-        except Exception as exc:
-            poly_rooms = []
-            polygonize_skipped_reason = f"polygonization failed: {exc}"
-        _stage("polygonize", t, count=len(poly_rooms))
-        if poly_rooms:
-            raw_rooms = [*raw_rooms, *poly_rooms]
+        texts = _extract_texts(doc)
+        if len(texts) > _MAX_TEXT_ENTITIES:
+            text_truncate_warning = (
+                f"Found {len(texts)} text entities; truncated to {_MAX_TEXT_ENTITIES} for label attachment."
+            )
+            texts = texts[:_MAX_TEXT_ENTITIES]
+        else:
+            text_truncate_warning = None
+        _stage("extract_texts", t, count=len(texts))
 
-        if not raw_rooms:
-            raise ValueError(
-                "No closed polylines, hatch boundaries, or recoverable polygon loops found in DXF. "
-                "The file may be a model-view drawing, or rooms are drawn as "
-                "disconnected annotations rather than enclosed polygons."
+        # Global polygonize from raw line/arc segments. Default ON because
+        # CAD drawings often draw rooms as wall lines, not closed polygons.
+        # The snap tolerance is the key knob: too tight (e.g. 0.15mm on a
+        # mm-based file) and corner gaps prevent loop closure; ~20mm of
+        # real-world distance reliably closes typical CAD wall corners
+        # without merging unrelated geometry.
+        polygonize_skipped_reason: Optional[str] = None
+        polygonize_warnings: list[str] = []
+        if enable_polygonize:
+            snap_tol_raw = max(0.020 / unit_scale, _POLYGONIZE_SNAP_TOLERANCE)
+            t = time.monotonic()
+            try:
+                poly_rooms, polygonize_warnings = _polygonize_from_doc(
+                    doc, snap_tolerance_raw=snap_tol_raw,
+                )
+            except Exception as exc:
+                poly_rooms = []
+                polygonize_skipped_reason = f"polygonization failed: {exc}"
+            _stage("polygonize", t, count=len(poly_rooms), snap_tol=snap_tol_raw)
+            if poly_rooms:
+                raw_rooms = [*raw_rooms, *poly_rooms]
+        else:
+            polygonize_skipped_reason = (
+                "polygonize disabled by request (enable_polygonize=false); "
+                "rooms come only from closed polylines and HATCHes."
             )
 
         t = time.monotonic()
@@ -1107,26 +1756,44 @@ class DxfImportService:
         _stage("validate_and_dedupe", t, kept=len(rooms), input=len(raw_rooms))
         if polygonize_skipped_reason:
             geom_warnings.append(polygonize_skipped_reason)
-        if not rooms:
-            raise ValueError(
-                "All polygons in the DXF were rejected as invalid, "
-                "zero-area, or noise. Check that rooms are drawn as "
-                "closed LWPOLYLINEs/HATCHes and have meaningful area."
-            )
+        if text_truncate_warning:
+            geom_warnings.append(text_truncate_warning)
+        if polygonize_warnings:
+            geom_warnings.extend(polygonize_warnings)
         if len(rooms) > _MAX_FINAL_ROOMS:
             raise ValueError(
                 f"Too many rooms detected ({len(rooms)}); the parser caps at {_MAX_FINAL_ROOMS} to avoid out-of-memory hangs. "
             )
 
+        # If $INSUNITS was 0, refine the unit scale now that we have
+        # polygons in raw units.
+        if not unit_known_from_header and rooms:
+            bbox_span = 0.0
+            for r in rooms:
+                poly = r.get("polygon") or []
+                if not poly:
+                    continue
+                xs_r = [p[0] for p in poly]
+                ys_r = [p[1] for p in poly]
+                if xs_r and ys_r:
+                    bbox_span = max(bbox_span, max(xs_r) - min(xs_r), max(ys_r) - min(ys_r))
+            unit_scale, refined_warnings = _resolve_unit_scale(doc, bbox_span)
+            unit_warnings = [*unit_warnings, *refined_warnings]
+
+        _scale_rooms(rooms, unit_scale)
+        rooms = [
+            r for r in rooms
+            if _MIN_ROOM_AREA_M2 <= _polygon_area_m2(r["polygon"]) <= _MAX_ROOM_AREA_M2
+        ]
+        _scale_texts(texts, unit_scale)
+
         t = time.monotonic()
-        texts = _extract_texts(doc)
-        if len(texts) > _MAX_TEXT_ENTITIES:
-            geom_warnings.append(
-                f"Found {len(texts)} text entities; truncated to {_MAX_TEXT_ENTITIES} for label attachment."
-            )
-            texts = texts[:_MAX_TEXT_ENTITIES]
-        _attach_labels(rooms, texts)
-        _stage("attach_labels", t, texts=len(texts), rooms=len(rooms))
+        rooms, label_warnings, label_stats = _filter_by_labels(rooms, texts)
+        rooms, envelopes_dropped = _drop_outer_envelopes(rooms)
+        _stage("filter_by_labels", t,
+               kept=len(rooms),
+               envelopes_dropped=envelopes_dropped,
+               dropped_unlabeled_small=label_stats.get("dropped_unlabeled_small", 0))
 
         spaces: list[dict] = []
         for i, r in enumerate(rooms, start=1):
@@ -1157,28 +1824,36 @@ class DxfImportService:
 
             tokens = re.findall(r"\b[\w-]+\b", label)
             short_name: Optional[str] = None
-            for t in tokens:
-                if any(ch.isdigit() for ch in t):
-                    short_name = t
+            for tok in tokens:
+                if any(ch.isdigit() for ch in tok):
+                    short_name = tok
                     break
 
             tags: list[str] = []
             layer = (r.get("layer") or "").strip()
             if layer:
                 tags.append(layer.lower())
-            for t in tokens:
-                tl = t.lower()
+            for tok in tokens:
+                tl = tok.lower()
                 if len(tl) > 1 and tl not in tags:
                     tags.append(tl)
             tags.append(src)
 
-            # Classification
-            space_type, is_nav, class_conf = _classify_space(layer, label, tags, overrides=layer_mapping)
-            # source-based base confidence
+            # Classify against the primary label first; if it's generic
+            # (e.g. a numeric ID like "0.054"), try the extras labels —
+            # the type-name often lives there ("Lager", "Teknik", etc.).
+            space_type, is_nav, class_conf = _classify_space(layer, label, overrides=layer_mapping)
+            if space_type == "ROOM_GENERIC":
+                meta_extras = (r.get("metadata") or {}).get("extra_labels") or []
+                for extra in meta_extras:
+                    e_type, e_nav, e_conf = _classify_space(layer, extra, overrides=layer_mapping)
+                    if e_type != "ROOM_GENERIC":
+                        space_type, is_nav, class_conf = e_type, e_nav, e_conf
+                        break
             base_conf = 0.95 if src == "closed_polyline" else 0.85 if src == "hatch" else 0.6
             confidence = min(1.0, base_conf * 0.7 + class_conf * 0.3)
 
-            meta = r.get("metadata") or {}
+            meta = dict(r.get("metadata") or {})
             meta.setdefault("source_layer", layer or None)
             meta.setdefault("source_geometry_type", src)
             meta.setdefault("confidence", round(confidence, 2))
@@ -1203,6 +1878,13 @@ class DxfImportService:
                 "metadata": meta,
                 "subspaces": [],
             })
+
+        # Merge spaces that look like the same physical room split into
+        # ID-bearing and type-bearing halves (CAD plans often place those
+        # labels several meters apart).
+        t = time.monotonic()
+        spaces, id_remap, merged_count = _merge_id_type_pairs(spaces)
+        _stage("merge_id_type_pairs", t, merged=merged_count, kept=len(spaces))
 
         xs: list[float] = []
         ys: list[float] = []
@@ -1256,34 +1938,68 @@ class DxfImportService:
             }
 
         t = time.monotonic()
-        if len(spaces) > _MAX_FINAL_ROOMS // 2:
+        arc_candidates = 0
+        if not spaces:
+            connections, conn_warnings = [], []
+        elif len(spaces) > _MAX_FINAL_ROOMS // 2:
             connections, conn_warnings = [], [
                 f"Skipped door inference: {len(spaces)} spaces is past the safety threshold; "
                 f"author connections in the editor instead."
             ]
         else:
-            connections, conn_warnings = _infer_connections(spaces, doc)
-        _stage("infer_connections", t, connections=len(connections))
+            connections, conn_warnings, arc_candidates = _infer_connections(spaces, doc, unit_scale)
+        _stage("infer_connections", t, connections=len(connections), arc_candidates=arc_candidates)
+
+        # If any spaces were merged, rewrite connection endpoints that
+        # still reference the absorbed (dropped) space ids. Defensive — the
+        # arc-based inference uses the post-merge spaces list, so this
+        # should normally be a no-op.
+        if id_remap:
+            for c in connections:
+                if c.get("from_space_id") in id_remap:
+                    c["from_space_id"] = id_remap[c["from_space_id"]]
+                if c.get("to_space_id") in id_remap:
+                    c["to_space_id"] = id_remap[c["to_space_id"]]
+            connections = [c for c in connections if c["from_space_id"] != c["to_space_id"]]
+
         schema["campus"]["connections"] = connections
 
-        # Diagnostics summary
         diagnostics_out = diagnostics.copy() if isinstance(diagnostics, dict) else {}
         diagnostics_out["raw_room_count"] = len(raw_rooms) if isinstance(raw_rooms, list) else None
         diagnostics_out["cleaned_room_count"] = len(rooms)
         diagnostics_out["parsing_engine"] = "ezdxf"
+        diagnostics_out["unit_scale_m"] = unit_scale
+        diagnostics_out["polygons_dropped_unlabeled_small"] = label_stats.get("dropped_unlabeled_small", 0)
+        diagnostics_out["polygons_kept_external_label"] = label_stats.get("kept_with_external_label", 0)
+        diagnostics_out["polygons_kept_unlabeled_large"] = label_stats.get("kept_unlabeled_large", 0)
+        diagnostics_out["polygons_dropped_envelope"] = envelopes_dropped
+        diagnostics_out["door_arc_candidates"] = arc_candidates
+        diagnostics_out["polygonize_skipped_reason"] = polygonize_skipped_reason
+        diagnostics_out["id_type_pairs_merged"] = merged_count
         schema["_diagnostics"] = diagnostics_out
 
-        schema["_warnings"] = [*dxf_warnings, *hatch_warnings, *geom_warnings, *conn_warnings]
-        # Add a clear hint when only a single room was found
-        if diagnostics_out.get("cleaned_room_count", 0) <= 1:
+        schema["_warnings"] = [
+            *dxf_warnings,
+            *hatch_warnings,
+            *geom_warnings,
+            *unit_warnings,
+            *label_warnings,
+            *conn_warnings,
+        ]
+        if not rooms:
+            schema["_warnings"].append(
+                "No labeled rooms detected — review file or layer mapping. "
+                "If the drawing has only raw linework, retry with enable_polygonize=true."
+            )
+        elif len(rooms) <= 1:
             schema["_warnings"].append(
                 "Only one or zero room-like polygons detected; import may be incomplete."
                 " Check for HATCH boundaries, unclosed linework, or that the drawing is a model view."
             )
 
         schema["_classification_summary"] = self._classification_summary(spaces)
-        log.warning("[dxf-import] DONE in %.2fs (rooms=%d, connections=%d)",
-                    time.monotonic() - t0, len(rooms), len(connections))
+        log.info("[dxf-import] DONE in %.2fs (rooms=%d, connections=%d)",
+                 time.monotonic() - t0, len(rooms), len(connections))
         return schema
 
     def _parse_with_dxfjson(
