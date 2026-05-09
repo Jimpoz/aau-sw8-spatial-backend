@@ -1279,35 +1279,48 @@ function pointInPolygon(px, py, polygon) {
 }
 
 function hitTest(canvasX, canvasY) {
-  // Use a screen-space (pixel) proximity test for door-like nodes; this
-  // avoids subtle world-space conversion issues and is more reliable for
-  // pointer hit detection on high-DPI displays and dynamic transforms.
+  // Destructure into worldX and worldY correctly
+  const [worldX, worldY] = canvasToWorld(canvasX, canvasY);
+
+  // Use a screen-space pixel proximity test for door-like nodes
   for (let i = state.spaces.length - 1; i >= 0; i--) {
     const s = state.spaces[i];
-    if ((!s.polygon || s.polygon.length < 3) && s.centroid_x != null && s.centroid_y != null && s.space_type) {
+
+    if (
+      (!s.polygon || s.polygon.length < 3) &&
+      s.centroid_x != null &&
+      s.centroid_y != null &&
+      s.space_type
+    ) {
       const st = String(s.space_type || '').toUpperCase();
+
       if (st.includes('DOOR') || st === 'PASSAGE') {
         try {
           const [cx, cy] = worldToCanvas(s.centroid_x, s.centroid_y);
           const distPx = Math.hypot(canvasX - cx, canvasY - cy);
-          if (distPx <= 12) return s; // 12px hit radius
+
+          if (distPx <= 12) return s;
         } catch (e) {
-          // fall back to previous world-space check if conversion fails
-          const [wx, wy] = canvasToWorld(canvasX, canvasY);
-          const [wx2] = canvasToWorld(canvasX + 8, canvasY);
-          const worldRadius = Math.max(0.5, Math.abs(wx2 - wx));
-          const dist = Math.hypot(wx - s.centroid_x, wy - s.centroid_y);
+          const [fallbackX, fallbackY] = canvasToWorld(canvasX, canvasY);
+          const [fallbackX2] = canvasToWorld(canvasX + 8, canvasY);
+          const worldRadius = Math.max(0.5, Math.abs(fallbackX2 - fallbackX));
+          const dist = Math.hypot(
+            fallbackX - s.centroid_x,
+            fallbackY - s.centroid_y
+          );
+
           if (dist < worldRadius * 1.5) return s;
         }
       }
     }
   }
-  // Existing polygon hit test
+  
   for (let i = state.spaces.length - 1; i >= 0; i--) {
     const s = state.spaces[i];
     if (!s.polygon || s.polygon.length < 3) continue;
-    if (pointInPolygon(wx, wy, s.polygon)) return s;
+    if (pointInPolygon(worldX, worldY, s.polygon)) return s;
   }
+
   return null;
 }
 
