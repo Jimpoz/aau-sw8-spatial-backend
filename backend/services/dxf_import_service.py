@@ -41,7 +41,7 @@ _LNG_RANGE = (-180.0, 180.0)
 _POLYGONIZE_SNAP_TOLERANCE = 1e-3
 _OUTER_AREA_RATIO = 8.0
 _DOOR_CONNECTION_THRESHOLD = 0.5
-""" DXF FILE LIMITS """
+#DXF FILE LIMITS
 _MAX_DXF_BYTES = 80 * 1024 * 1024            
 _MAX_FINAL_ROOMS = 8000                
 _MAX_TEXT_ENTITIES = 5000                     
@@ -98,15 +98,12 @@ def _walk_polygons(entities, depth: int = 0, inherited_layer: Optional[str] = No
     """
     out: list[dict] = []
     if depth > 6:
-        # Defensive: protect against pathological deeply-nested blocks.
         return out
     for entity in entities:
         try:
             dxftype = entity.dxftype()
         except Exception:
             continue
-        # Determine effective layer: entity layer unless it's the
-        # special '0' layer in which case fall back to inherited_layer.
         eff_layer = None
         try:
             raw_layer = getattr(entity.dxf, "layer", None)
@@ -123,9 +120,6 @@ def _walk_polygons(entities, depth: int = 0, inherited_layer: Optional[str] = No
             if poly:
                 out.append({"layer": eff_layer or (getattr(entity.dxf, "layer", "") or ""), "polygon": poly, "source": "closed_polyline"})
         elif dxftype == "INSERT":
-            # Block reference. Recurse into its virtual children and
-            # pass the INSERT's layer as inherited_layer so children on
-            # layer "0" pick it up.
             try:
                 child_layer = getattr(entity.dxf, "layer", None) or inherited_layer
                 out.extend(_walk_polygons(entity.virtual_entities(), depth + 1, inherited_layer=child_layer))
@@ -277,9 +271,6 @@ def _polygonize_from_doc(doc: Drawing) -> list[dict]:
     if not raw_segments:
         return []
 
-    # Adaptive snap: keep small for precision but allow tiny gaps
-    # relative to drawing size. Use the configured constant as a
-    # conservative floor.
     try:
         xs = [c for s in raw_segments for c in (s.coords[0][0], s.coords[-1][0])]
         ys = [c for s in raw_segments for c in (s.coords[0][1], s.coords[-1][1])]
@@ -307,8 +298,6 @@ def _polygonize_from_doc(doc: Drawing) -> list[dict]:
     if not polys:
         return []
 
-    # Remove likely outer building polygon when it's much larger than
-    # the rest and contains the others.
     areas = sorted([p.area for p in polys])
     if len(areas) >= 2:
         median = areas[len(areas) // 2]
@@ -450,8 +439,6 @@ def _validate_and_dedupe(rooms: list[dict]) -> tuple[list[dict], list[str]]:
         if not shape.is_valid:
             try:
                 repaired = make_valid(shape)
-                # `make_valid` may produce a MultiPolygon when the input
-                # self-intersects; pick the largest piece.
                 if repaired.geom_type == "MultiPolygon":
                     parts = list(repaired.geoms)
                     parts.sort(key=lambda g: g.area, reverse=True)
@@ -471,10 +458,7 @@ def _validate_and_dedupe(rooms: list[dict]) -> tuple[list[dict], list[str]]:
                 warnings.append(f"layer {r['layer']!r}: polygon was invalid and could not be repaired, dropped")
                 continue
         if shape.area < _MIN_ROOM_AREA:
-            # Annotations, hatch fragments, dimension boxes etc.
             continue
-        # Deduplicate by rounded vertex sequence (tolerates micro
-        # floating-point differences between coincident polygons).
         sig = tuple(sorted((round(x, 4), round(y, 4)) for x, y in polygon))
         if sig in seen_signatures:
             continue
@@ -484,19 +468,12 @@ def _validate_and_dedupe(rooms: list[dict]) -> tuple[list[dict], list[str]]:
 
 
 def _extract_texts(doc: Drawing) -> list[dict]:
-    """Collect text-like labels from the document.
-
-    Returns list of dicts with keys: x, y, text, layer, source_type.
-    Supports TEXT, MTEXT, ATTRIB (from INSERTs) and text inside
-    virtual_entities() produced by INSERTs. MTEXT is cleaned of
-    common formatting characters.
-    """
+    """Collect text-like labels from the document."""
     def _clean_mtext(raw: str) -> str:
         s = str(raw)
-        # Replace newlines with spaces, remove control codes
+        
         s = s.replace("\r", " ").replace("\n", " ")
         s = re.sub(r"\s+", " ", s)
-        # Remove common MTEXT formatting sequences (simple heuristic)
         s = re.sub(r"\{\\.*?\}", "", s)
         return s.strip()
 
@@ -540,7 +517,6 @@ def _extract_texts(doc: Drawing) -> list[dict]:
                 except Exception:
                     continue
             elif t == "INSERT":
-                # Recurse into virtual entities with the INSERT's layer
                 try:
                     child_layer = getattr(e.dxf, "layer", None) or inherited_layer
                     _walk_text_entities(e.virtual_entities(), inherited_layer=child_layer)
@@ -552,7 +528,6 @@ def _extract_texts(doc: Drawing) -> list[dict]:
 
 
 def _attach_labels(rooms: list[dict], texts: list[dict]) -> None:
-    # Build Shapely polygons and attach all contained texts to each
     polys = []
     for r in rooms:
         try:
@@ -936,39 +911,11 @@ def _convert_dwg_to_dxf(dwg_bytes: bytes) -> bytes:
         return _convert_dwg_with_libredwg(dwg_bytes)
     raise FileNotFoundError(
         "No DWG converter is installed on the backend. Three ways to fix this:\n"
-        "  1) Convert the .dwg to .dxf on your machine and upload the .dxf. "
-        "Every CAD tool can do this — LibreCAD, DraftSight, AutoCAD, or the "
-        "free standalone ODA File Converter.\n"
-        "  2) Rebuild the backend image with the LibreDWG build flag:\n"
-        "       docker compose build --build-arg INSTALL_LIBREDWG=1 backend\n"
-        "     This is the default in the current Dockerfile — re-running "
-        "`docker compose build backend` should produce an image where "
-        "DWG just works.\n"
-        "  3) For higher-fidelity DWG support, install ODAFileConverter via "
-        "the build arg (requires you to mirror the .deb yourself):\n"
-        "       docker compose build --build-arg INSTALL_ODA=1 \\\n"
-        "         --build-arg ODA_DEB_URL=https://your-mirror/...deb backend\n"
     )
 
 
 def _sanitize_libredwg_dxf(dxf_bytes: bytes) -> tuple[bytes, list[str]]:
-    """Strip malformed code/value pairs from a LibreDWG-produced DXF.
-
-    LibreDWG's DXF writer occasionally emits a non-numeric line where a
-    DXF group code should be (typically a font name leaking out of the
-    STYLE/TEXT tables). DXF is a strict alternating code/value stream
-    where code lines must parse as integers in [0, 1071]; anything else
-    is structural corruption that ezdxf's recovery path can't repair.
-
-    The strategy is to walk the file as code/value pairs and, on any
-    malformed code line, drop *one* line to resync the pair counter and
-    continue. This salvages the rest of the file at the cost of losing
-    a handful of entities (almost always table records, not geometry).
-
-    This is a fallback. We only call it when ezdxf's strict and recovery
-    paths have already failed on a DWG-converted DXF — running it on
-    clean files is safe but pointless.
-    """
+    """Strip malformed code/value pairs from a LibreDWG-produced DXF."""
     text = dxf_bytes.decode("utf-8", errors="replace")
     lines = text.splitlines()
     out: list[str] = []
@@ -984,9 +931,6 @@ def _sanitize_libredwg_dxf(dxf_bytes: bytes) -> tuple[bytes, list[str]]:
             if code < 0 or code > 1071:
                 raise ValueError("group code out of range")
         except ValueError:
-            # Bad code line — drop it and resync. Don't advance the
-            # value index because the malformation is usually a single
-            # extra line, so the next line is a valid code.
             dropped += 1
             if dropped <= 5:
                 value_peek = lines[i + 1].strip() if i + 1 < n else ""
@@ -1009,11 +953,7 @@ def _sanitize_libredwg_dxf(dxf_bytes: bytes) -> tuple[bytes, list[str]]:
 
 
 def _read_dxf_robust(dxf_bytes: bytes) -> tuple[Drawing, list[str]]:
-    """Read a DXF (ASCII or binary) using ezdxf's recovery path. The
-    recovery path tolerates encoding mismatches, missing headers, and a
-    handful of other malformations that the strict reader rejects.
-    Returns the document plus a list of recovered-error strings the
-    auditor flagged."""
+    """Read a DXF (ASCII or binary) using ezdxf's recovery path."""
     with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tmp:
         tmp.write(dxf_bytes)
         tmp_path = tmp.name
@@ -1050,9 +990,7 @@ def _validate_origin(lat: Optional[float], lng: Optional[float]) -> None:
 
 class DxfImportService:
     """Translates a DXF (or a DWG that we first transcode) into a
-    `MapImportSchema`-compatible dict. The output is fed straight into
-    `ImportService.import_map` so the DXF flow shares the same atomic
-    Neo4j+PostGIS pipeline as the JSON flow."""
+    `MapImportSchema`-compatible dict."""
 
     def parse(
         self,
@@ -1077,10 +1015,7 @@ class DxfImportService:
 
         if len(file_bytes) > _MAX_DXF_BYTES:
             raise ValueError(
-                f"Upload is {len(file_bytes) // (1024*1024)} MB; the parser refuses "
-                f"files larger than {_MAX_DXF_BYTES // (1024*1024)} MB to avoid "
-                f"out-of-memory hangs. Split the drawing per floor, or raise "
-                f"_MAX_DXF_BYTES in dxf_import_service.py if you've sized the host."
+                f"File size {len(file_bytes)} exceeds maximum of {_MAX_DXF_BYTES} bytes. "
             )
 
         import time
@@ -1090,8 +1025,6 @@ class DxfImportService:
         def _stage(label: str, started: float, **extra) -> None:
             log.warning("[dxf-import] %s took %.2fs %s", label, time.monotonic() - started, extra or "")
 
-        # Resolve the upload to DXF bytes regardless of which CAD format
-        # the user sent.
         ext = Path(filename or "").suffix.lower()
         from_dwg = False
         if ext == ".dxf":
@@ -1106,21 +1039,11 @@ class DxfImportService:
                 f"Unsupported file extension '{ext}'. Upload a .dxf or a .dwg."
             )
 
-        # Robust read: handles ASCII DXF, binary DXF, and slightly
-        # malformed files that the strict reader rejects.
         sanitize_warnings: list[str] = []
         t = time.monotonic()
         try:
             doc, dxf_warnings = _read_dxf_robust(dxf_bytes)
         except ValueError as exc:
-            # The recovery path raises ValueError when the DXF is
-            # structurally malformed beyond what ezdxf can repair. If we
-            # got here via a DWG conversion, the malformation is almost
-            # certainly LibreDWG's DXF writer (it occasionally emits a
-            # non-numeric line where a group code should be — e.g. a
-            # font name from the STYLE table). Run the sanitizer pass
-            # and retry; if that still fails, surface an actionable
-            # error so the user knows their options.
             if from_dwg and "Invalid group code" in str(exc):
                 sanitized_bytes, sanitize_warnings = _sanitize_libredwg_dxf(dxf_bytes)
                 try:
@@ -1142,8 +1065,6 @@ class DxfImportService:
                     ) from exc2
             else:
                 raise
-        # Surface the sanitizer's warnings alongside the auditor's so
-        # the editor sees what was salvaged.
         if sanitize_warnings:
             dxf_warnings = [*sanitize_warnings, *dxf_warnings]
         _stage("ezdxf parse", t)
@@ -1207,14 +1128,12 @@ class DxfImportService:
         _attach_labels(rooms, texts)
         _stage("attach_labels", t, texts=len(texts), rooms=len(rooms))
 
-        # Build enriched spaces with metadata, classification, and sizes.
         spaces: list[dict] = []
         for i, r in enumerate(rooms, start=1):
             sid = f"{floor_id}_space_{i}"
             label = r.get("label") or f"Room {i}"
             polygon = r["polygon"]
             src = r.get("source") or "closed_polyline"
-            # Centroid and area via shapely when possible
             try:
                 shape = Polygon(polygon)
                 cx, cy = float(shape.centroid.x), float(shape.centroid.y)
@@ -1236,7 +1155,6 @@ class DxfImportService:
                     width = 0.0
                     length = 0.0
 
-            # Short name heuristic: first token containing a digit
             tokens = re.findall(r"\b[\w-]+\b", label)
             short_name: Optional[str] = None
             for t in tokens:
@@ -1244,7 +1162,6 @@ class DxfImportService:
                     short_name = t
                     break
 
-            # Tags: layer + label tokens + source
             tags: list[str] = []
             layer = (r.get("layer") or "").strip()
             if layer:
@@ -1287,8 +1204,6 @@ class DxfImportService:
                 "subspaces": [],
             })
 
-        # Compute building/floor bounds from the detected spaces so the
-        # JSON matches the richer shape in `test_3.json`.
         xs: list[float] = []
         ys: list[float] = []
         for s in spaces:
@@ -1358,9 +1273,6 @@ class DxfImportService:
         diagnostics_out["parsing_engine"] = "ezdxf"
         schema["_diagnostics"] = diagnostics_out
 
-        # Surface every warning the parsing pipeline produced — DXF
-        # auditor recoveries plus geometry repairs — so the editor can
-        # see what was salvaged before they trust the import.
         schema["_warnings"] = [*dxf_warnings, *hatch_warnings, *geom_warnings, *conn_warnings]
         # Add a clear hint when only a single room was found
         if diagnostics_out.get("cleaned_room_count", 0) <= 1:
@@ -1393,12 +1305,7 @@ class DxfImportService:
         origin_bearing: float = 0.0,
         layer_mapping: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
-        """Attempt to parse the DXF using the Node `dxf-json` parser as a
-        fallback. This requires `node` on PATH and the repository script
-        `scripts/dxf_json_parse.mjs` to be present (we added this helper
-        to the repo). Raises FileNotFoundError when Node/script isn't
-        available so the caller can surface an actionable message.
-        """
+        """Attempt to parse the DXF using the Node `dxf-json` parser as a fallback. """
         node_exec = shutil.which("node") or shutil.which("nodejs")
         if not node_exec:
             raise FileNotFoundError("Node.js executable not found on PATH. Install Node.js in the backend image or run the conversion locally.")
