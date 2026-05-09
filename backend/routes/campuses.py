@@ -241,8 +241,8 @@ async def import_dxf(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DXF parse failed: {exc}")
 
-    warnings = schema_dict.pop("_warnings", [])
-    classification = schema_dict.pop("_classification_summary", {})
+    warnings = schema_dict.get("_warnings", [])
+    classification = schema_dict.get("_classification_summary", {})
     spaces_in_floor = schema_dict["campus"]["buildings"][0]["floors"][0]["spaces"]
     rooms_detected = len(spaces_in_floor)
 
@@ -252,19 +252,37 @@ async def import_dxf(
         raise HTTPException(status_code=422, detail=f"Schema validation failed: {exc}")
 
     if dry_run:
+        id_to_centroid = {s["id"]: (s.get("centroid_x"), s.get("centroid_y")) for s in spaces_in_floor}
+        preview_conns = []
+        for c in (schema_dict.get("campus", {}).get("connections") or []):
+            from_id = c.get("from_space_id") or c.get("from_id") or c.get("from")
+            to_id = c.get("to_space_id") or c.get("to_id") or c.get("to")
+            if not from_id or not to_id:
+                continue
+            from_xy = id_to_centroid.get(from_id, (None, None))
+            to_xy = id_to_centroid.get(to_id, (None, None))
+            preview_conns.append({
+                "from_id": from_id,
+                "to_id": to_id,
+                "from_cx": from_xy[0],
+                "from_cy": from_xy[1],
+                "to_cx": to_xy[0],
+                "to_cy": to_xy[1],
+                "connection_type": c.get("connection_type"),
+                "is_accessible": c.get("is_accessible", True),
+            })
+
         return {
             "dry_run": True,
             "rooms_detected": rooms_detected,
             "classification_summary": classification,
             "warnings": warnings,
+            "preview_schema": schema_dict,
             "preview_spaces": [
-                {
-                    "id": s["id"],
-                    "display_name": s["display_name"],
-                    "space_type": s["space_type"],
-                }
+                {"id": s["id"], "display_name": s["display_name"], "space_type": s["space_type"]}
                 for s in spaces_in_floor
             ],
+            "preview_connections": preview_conns,
         }
 
     from services.audit_service import write_audit_log

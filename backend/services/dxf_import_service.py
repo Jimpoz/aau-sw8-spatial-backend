@@ -41,6 +41,10 @@ _LNG_RANGE = (-180.0, 180.0)
 _POLYGONIZE_SNAP_TOLERANCE = 1e-3
 _OUTER_AREA_RATIO = 8.0
 _DOOR_CONNECTION_THRESHOLD = 0.5
+""" DXF FILE LIMITS """
+_MAX_DXF_BYTES = 80 * 1024 * 1024            
+_MAX_FINAL_ROOMS = 8000                
+_MAX_TEXT_ENTITIES = 5000                     
 
 
 def _classify_layer(
@@ -147,17 +151,18 @@ def _approximate_arc_points(center_x: float, center_y: float, radius: float, sta
     return points
 
 
-def _polygonize_from_doc(doc: Drawing) -> list[dict]:
-    """Collect linear edges from the ezdxf document and run
-    `shapely.ops.polygonize` to recover enclosed polygons formed by
-    line/arc/circle geometry. Returns a list of `{layer, polygon}`
-    dicts similar to `_walk_polygons` output.
-    """
-    msp = doc.modelspace()
+def _collect_segments_from_entities(entities, depth: int = 0) -> list[LineString]:
+    """Collect linear segments from an entity iterable (modelspace or
+    virtual_entities). Recurses into INSERTs. Returns raw LineString
+    segments (coordinates in document units)."""
     segments: list[LineString] = []
-    # Collect segments from common geometric entities
-    for e in msp:
-        t = e.dxftype()
+    if depth > 8:
+        return segments
+    for e in entities:
+        try:
+            t = e.dxftype()
+        except Exception:
+            continue
         try:
             if t == "LINE":
                 s = e.dxf.start
@@ -183,7 +188,7 @@ def _polygonize_from_doc(doc: Drawing) -> list[dict]:
             elif t == "CIRCLE":
                 c = e.dxf.center
                 r = float(e.dxf.radius)
-                pts = _approximate_arc_points(float(c[0]), float(c[1]), r, 0.0, 360.0, steps=24)
+                pts = _approximate_arc_points(float(c[0]), float(c[1]), r, 0.0, 360.0, steps=32)
                 for a, b in zip(pts, pts[1:]):
                     segments.append(LineString([a, b]))
             elif t == "ARC":
@@ -191,36 +196,113 @@ def _polygonize_from_doc(doc: Drawing) -> list[dict]:
                 r = float(e.dxf.radius)
                 start = float(e.dxf.start_angle)
                 end = float(e.dxf.end_angle)
-                pts = _approximate_arc_points(float(c[0]), float(c[1]), r, start, end, steps=12)
+                pts = _approximate_arc_points(float(c[0]), float(c[1]), r, start, end, steps=20)
                 for a, b in zip(pts, pts[1:]):
                     segments.append(LineString([a, b]))
             elif t == "INSERT":
-                # Recurse into virtual entities from the INSERT block
                 try:
-                    segments.extend([seg for seg in _polygonize_from_doc(e).segments])
+                    segments.extend(_collect_segments_from_entities(e.virtual_entities(), depth + 1))
                 except Exception:
                     continue
         except Exception:
             continue
+    return segments
 
+
+def _snap_and_dedupe_segments(segments: list[LineString], snap_tol: float) -> list[LineString]:
+    """Snap segment endpoints to a coarse grid (precision snap_tol),
+    dedupe identical/degenerate segments, and return cleaned
+    LineStrings suitable for polygonization.
+    This is intentionally conservative: snap_tol should be small for
+    precise results.
+    """
     if not segments:
         return []
 
-    # Snap coordinates to reduce tiny gaps produced by CAD exports.
-    def _snap(line: LineString) -> LineString:
-        pts = [(round(float(x) / _POLYGONIZE_SNAP_TOLERANCE) * _POLYGONIZE_SNAP_TOLERANCE,
-                round(float(y) / _POLYGONIZE_SNAP_TOLERANCE) * _POLYGONIZE_SNAP_TOLERANCE)
-               for x, y in line.coords]
-        return LineString(pts)
+    cell_map: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    pts_keys: list[tuple[int, int]] = []
+    for s in segments:
+        try:
+            coords = list(s.coords)
+        except Exception:
+            continue
+        for x, y in (coords[0], coords[-1]):
+            key = (int(round(x / snap_tol)), int(round(y / snap_tol)))
+            cell_map.setdefault(key, []).append((float(x), float(y)))
+            pts_keys.append(key)
+
+    canonical: dict[tuple[int, int], tuple[float, float]] = {}
+    for k, pts in cell_map.items():
+        sx = sum(p[0] for p in pts)
+        sy = sum(p[1] for p in pts)
+        n = len(pts)
+        canonical[k] = (sx / n, sy / n)
+
+    seen: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    out: list[LineString] = []
+    for s in segments:
+        try:
+            coords = list(s.coords)
+            a = coords[0]
+            b = coords[-1]
+            ka = (int(round(a[0] / snap_tol)), int(round(a[1] / snap_tol)))
+            kb = (int(round(b[0] / snap_tol)), int(round(b[1] / snap_tol)))
+            pa = canonical.get(ka, (float(a[0]), float(a[1])))
+            pb = canonical.get(kb, (float(b[0]), float(b[1])))
+            if pa == pb:
+                continue
+            key = (pa, pb) if pa <= pb else (pb, pa)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(LineString([pa, pb]))
+        except Exception:
+            continue
+
+    return out
+
+
+def _polygonize_from_doc(doc: Drawing) -> list[dict]:
+    """Polygonize by collecting segments (recursing into INSERTs),
+    snapping endpoints conservatively, merging, and running
+    `shapely.ops.polygonize`.
+    Returns list of {layer, polygon, source} dicts.
+    """
+    try:
+        msp = doc.modelspace()
+    except Exception:
+        return []
+
+    raw_segments = _collect_segments_from_entities(msp)
+    if not raw_segments:
+        return []
+
+    # Adaptive snap: keep small for precision but allow tiny gaps
+    # relative to drawing size. Use the configured constant as a
+    # conservative floor.
+    try:
+        xs = [c for s in raw_segments for c in (s.coords[0][0], s.coords[-1][0])]
+        ys = [c for s in raw_segments for c in (s.coords[0][1], s.coords[-1][1])]
+        if xs and ys:
+            dx = max(xs) - min(xs)
+            dy = max(ys) - min(ys)
+            diag = math.hypot(dx, dy)
+            snap_tol = max(_POLYGONIZE_SNAP_TOLERANCE, diag * 1e-6)
+        else:
+            snap_tol = _POLYGONIZE_SNAP_TOLERANCE
+    except Exception:
+        snap_tol = _POLYGONIZE_SNAP_TOLERANCE
+
+    segs = _snap_and_dedupe_segments(raw_segments, snap_tol)
+    if not segs:
+        return []
 
     try:
-        segs = [_snap(s) for s in segments]
         merged = unary_union(segs)
         polys = list(polygonize(merged))
     except Exception:
         return []
 
-    # Filter and dedupe
     polys = [p for p in polys if not p.is_empty and p.area >= _MIN_ROOM_AREA]
     if not polys:
         return []
@@ -232,7 +314,6 @@ def _polygonize_from_doc(doc: Drawing) -> list[dict]:
         median = areas[len(areas) // 2]
         largest = max(areas)
         if median > 0 and largest / median > _OUTER_AREA_RATIO:
-            # Find the largest polygon and see if it contains most others.
             largest_poly = max(polys, key=lambda p: p.area)
             contains_count = sum(1 for p in polys if largest_poly.buffer(0).contains(p) and p != largest_poly)
             if contains_count >= max(1, len(polys) // 2):
@@ -992,10 +1073,22 @@ class DxfImportService:
         origin_bearing: float = 0.0,
         layer_mapping: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
-        # Range-check the origin up front. A typo here lands buildings
-        # in the wrong hemisphere; failing early with a clear error
-        # beats a mysteriously-empty world map.
         _validate_origin(origin_lat, origin_lng)
+
+        if len(file_bytes) > _MAX_DXF_BYTES:
+            raise ValueError(
+                f"Upload is {len(file_bytes) // (1024*1024)} MB; the parser refuses "
+                f"files larger than {_MAX_DXF_BYTES // (1024*1024)} MB to avoid "
+                f"out-of-memory hangs. Split the drawing per floor, or raise "
+                f"_MAX_DXF_BYTES in dxf_import_service.py if you've sized the host."
+            )
+
+        import time
+        import logging
+        log = logging.getLogger("dxf_import")
+        t0 = time.monotonic()
+        def _stage(label: str, started: float, **extra) -> None:
+            log.warning("[dxf-import] %s took %.2fs %s", label, time.monotonic() - started, extra or "")
 
         # Resolve the upload to DXF bytes regardless of which CAD format
         # the user sent.
@@ -1004,8 +1097,10 @@ class DxfImportService:
         if ext == ".dxf":
             dxf_bytes = file_bytes
         elif ext == ".dwg":
+            t = time.monotonic()
             dxf_bytes = _convert_dwg_to_dxf(file_bytes)
             from_dwg = True
+            _stage("dwg→dxf transcode", t, output_bytes=len(dxf_bytes))
         else:
             raise ValueError(
                 f"Unsupported file extension '{ext}'. Upload a .dxf or a .dwg."
@@ -1014,6 +1109,7 @@ class DxfImportService:
         # Robust read: handles ASCII DXF, binary DXF, and slightly
         # malformed files that the strict reader rejects.
         sanitize_warnings: list[str] = []
+        t = time.monotonic()
         try:
             doc, dxf_warnings = _read_dxf_robust(dxf_bytes)
         except ValueError as exc:
@@ -1050,24 +1146,34 @@ class DxfImportService:
         # the editor sees what was salvaged.
         if sanitize_warnings:
             dxf_warnings = [*sanitize_warnings, *dxf_warnings]
+        _stage("ezdxf parse", t)
 
         # Gather diagnostics
+        t = time.monotonic()
         diagnostics = _collect_diagnostics_from_doc(doc)
+        _stage("diagnostics", t)
 
-        # Walk polygons (recursing into INSERT block references), add HATCH
-        # polygons, then validate/dedupe. Polygonize is the final fallback.
+        t = time.monotonic()
         raw_rooms = _walk_polygons(doc.modelspace())
-        hatch_warnings: list[str] = []
-        if not raw_rooms:
-            # Try hatch extraction first
-            hatch_rooms, hatch_warnings = _extract_hatch_polygons(doc)
-            if hatch_rooms:
-                raw_rooms = hatch_rooms
-        if not raw_rooms:
-            # Try to recover polygons by polygonizing line/arc/circle
-            # geometry — this catches drawings where rooms are authored
-            # as separate LINE segments rather than closed polylines.
-            raw_rooms = _polygonize_from_doc(doc)
+        _stage("walk_polygons", t, count=len(raw_rooms))
+
+        t = time.monotonic()
+        hatch_rooms, hatch_warnings = _extract_hatch_polygons(doc)
+        _stage("hatch", t, count=len(hatch_rooms))
+        if hatch_rooms:
+            raw_rooms = [*raw_rooms, *hatch_rooms]
+
+        polygonize_skipped_reason: Optional[str] = None
+        t = time.monotonic()
+        try:
+            poly_rooms = _polygonize_from_doc(doc)
+        except Exception as exc:
+            poly_rooms = []
+            polygonize_skipped_reason = f"polygonization failed: {exc}"
+        _stage("polygonize", t, count=len(poly_rooms))
+        if poly_rooms:
+            raw_rooms = [*raw_rooms, *poly_rooms]
+
         if not raw_rooms:
             raise ValueError(
                 "No closed polylines, hatch boundaries, or recoverable polygon loops found in DXF. "
@@ -1075,16 +1181,31 @@ class DxfImportService:
                 "disconnected annotations rather than enclosed polygons."
             )
 
+        t = time.monotonic()
         rooms, geom_warnings = _validate_and_dedupe(raw_rooms)
+        _stage("validate_and_dedupe", t, kept=len(rooms), input=len(raw_rooms))
+        if polygonize_skipped_reason:
+            geom_warnings.append(polygonize_skipped_reason)
         if not rooms:
             raise ValueError(
                 "All polygons in the DXF were rejected as invalid, "
                 "zero-area, or noise. Check that rooms are drawn as "
                 "closed LWPOLYLINEs/HATCHes and have meaningful area."
             )
+        if len(rooms) > _MAX_FINAL_ROOMS:
+            raise ValueError(
+                f"Too many rooms detected ({len(rooms)}); the parser caps at {_MAX_FINAL_ROOMS} to avoid out-of-memory hangs. "
+            )
 
+        t = time.monotonic()
         texts = _extract_texts(doc)
+        if len(texts) > _MAX_TEXT_ENTITIES:
+            geom_warnings.append(
+                f"Found {len(texts)} text entities; truncated to {_MAX_TEXT_ENTITIES} for label attachment."
+            )
+            texts = texts[:_MAX_TEXT_ENTITIES]
         _attach_labels(rooms, texts)
+        _stage("attach_labels", t, texts=len(texts), rooms=len(rooms))
 
         # Build enriched spaces with metadata, classification, and sizes.
         spaces: list[dict] = []
@@ -1219,8 +1340,15 @@ class DxfImportService:
                 "entity_type": "OTHER",
             }
 
-        # Infer conservative connections (doors) and collect warnings
-        connections, conn_warnings = _infer_connections(spaces, doc)
+        t = time.monotonic()
+        if len(spaces) > _MAX_FINAL_ROOMS // 2:
+            connections, conn_warnings = [], [
+                f"Skipped door inference: {len(spaces)} spaces is past the safety threshold; "
+                f"author connections in the editor instead."
+            ]
+        else:
+            connections, conn_warnings = _infer_connections(spaces, doc)
+        _stage("infer_connections", t, connections=len(connections))
         schema["campus"]["connections"] = connections
 
         # Diagnostics summary
@@ -1242,6 +1370,8 @@ class DxfImportService:
             )
 
         schema["_classification_summary"] = self._classification_summary(spaces)
+        log.warning("[dxf-import] DONE in %.2fs (rooms=%d, connections=%d)",
+                    time.monotonic() - t0, len(rooms), len(connections))
         return schema
 
     def _parse_with_dxfjson(

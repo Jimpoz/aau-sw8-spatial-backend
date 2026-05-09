@@ -984,11 +984,21 @@ function render() {
     ctx.restore();
   }
 
+  // Update canvas cursor based on hover / mode
+  if (state.isDragging) {
+    canvas.style.cursor = 'grabbing';
+  } else if (state.mode === 'addSpace') {
+    canvas.style.cursor = 'crosshair';
+  } else if (state.hoveredSpace && (!state.hoveredSpace.polygon || state.hoveredSpace.polygon.length < 3) && (String(state.hoveredSpace.space_type||'').toUpperCase().includes('DOOR') || String(state.hoveredSpace.space_type||'').toUpperCase() === 'PASSAGE')) {
+    canvas.style.cursor = 'move';
+  } else {
+    canvas.style.cursor = state.mode === 'connect' ? 'pointer' : 'grab';
+  }
+
   // Draw spaces
   for (const space of state.spaces) {
-    const isConnType = space.space_type && (
-      space.space_type.startsWith('DOOR_') || space.space_type === 'PASSAGE'
-    );
+    const st = String(space.space_type || '').toUpperCase();
+    const isConnType = st.includes('DOOR') || st === 'PASSAGE';
 
     if (!space.polygon || space.polygon.length < 3) {
       // Draw connection nodes (doors/passages) as small rectangles at centroid
@@ -1002,6 +1012,12 @@ function render() {
         ctx.lineWidth = 0.5;
         ctx.fillRect(cx - size, cy - size/2, size * 2, size);
         ctx.strokeRect(cx - size, cy - size/2, size * 2, size);
+        // Debug halo for clickable area (12px radius)
+        ctx.beginPath();
+        ctx.strokeStyle = 'rgba(0,150,250,0.18)';
+        ctx.lineWidth = 1;
+        ctx.arc(cx, cy, 12, 0, Math.PI * 2);
+        ctx.stroke();
         if (showLabels) {
           const fontSize = Math.min(10, Math.max(7, effScale * 0.5));
           ctx.font = `${fontSize}px -apple-system, sans-serif`;
@@ -1067,38 +1083,87 @@ function render() {
   // Draw connection arrows
   for (const conn of state.connections) {
     if (conn.from_cx == null || conn.from_cy == null || conn.to_cx == null || conn.to_cy == null) continue;
-    const [x1, y1] = worldToCanvas(conn.from_cx, conn.from_cy);
-    const [x2, y2] = worldToCanvas(conn.to_cx, conn.to_cy);
-    const dx = x2 - x1, dy = y2 - y1;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist < 10) continue;
+    // If a door midpoint has been associated with this connection, draw
+    // two segments (from->door, door->to) so the arrow visually attaches
+    // to the moved door. Otherwise draw the simple shortened line.
+    if (conn.door_cx != null && conn.door_cy != null) {
+      const [fx, fy] = worldToCanvas(conn.from_cx, conn.from_cy);
+      const [dx, dy] = worldToCanvas(conn.door_cx, conn.door_cy);
+      const [tx, ty] = worldToCanvas(conn.to_cx, conn.to_cy);
 
-    // Shorten line: 30% from each end, max 20px
-    const shrink = Math.min(dist * 0.3, 20);
-    const ux = dx / dist, uy = dy / dist;
-    const sx = x1 + ux * shrink, sy = y1 + uy * shrink;
-    const ex = x2 - ux * shrink, ey = y2 - uy * shrink;
+      // Draw first segment (from -> door)
+      ctx.save();
+      ctx.strokeStyle = 'rgba(150,150,150,0.45)';
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.moveTo(fx, fy);
+      ctx.lineTo(dx, dy);
+      ctx.stroke();
+      ctx.restore();
 
-    ctx.save();
-    ctx.strokeStyle = 'rgba(150,150,150,0.5)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(ex, ey);
-    ctx.stroke();
+      // Draw second segment (door -> to) with arrowhead
+      const mdx = tx - dx, mdy = ty - dy;
+      const mdist = Math.sqrt(mdx * mdx + mdy * mdy);
+      if (mdist < 6) continue;
+      const mshrink = Math.min(mdist * 0.15, 12);
+      const mux = mdx / mdist, muy = mdy / mdist;
+      const msx = dx + mux * mshrink, msy = dy + muy * mshrink;
+      const mex = tx - mux * mshrink, mey = ty - muy * mshrink;
 
-    // Arrowhead at target end
-    ctx.fillStyle = 'rgba(150,150,150,0.7)';
-    const angle = Math.atan2(ey - sy, ex - sx);
-    ctx.translate(ex, ey);
-    ctx.rotate(angle);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(-8, -4);
-    ctx.lineTo(-8, 4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
+      ctx.save();
+      ctx.strokeStyle = 'rgba(150,150,150,0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(msx, msy);
+      ctx.lineTo(mex, mey);
+      ctx.stroke();
+
+      // Arrowhead
+      ctx.fillStyle = 'rgba(150,150,150,0.7)';
+      const mangle = Math.atan2(mey - msy, mex - msx);
+      ctx.translate(mex, mey);
+      ctx.rotate(mangle);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-8, -4);
+      ctx.lineTo(-8, 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    } else {
+      const [x1, y1] = worldToCanvas(conn.from_cx, conn.from_cy);
+      const [x2, y2] = worldToCanvas(conn.to_cx, conn.to_cy);
+      const dx = x2 - x1, dy = y2 - y1;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 10) continue;
+
+      // Shorten line: 30% from each end, max 20px
+      const shrink = Math.min(dist * 0.3, 20);
+      const ux = dx / dist, uy = dy / dist;
+      const sx = x1 + ux * shrink, sy = y1 + uy * shrink;
+      const ex = x2 - ux * shrink, ey = y2 - uy * shrink;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(150,150,150,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+
+      // Arrowhead at target end
+      ctx.fillStyle = 'rgba(150,150,150,0.7)';
+      const angle = Math.atan2(ey - sy, ex - sx);
+      ctx.translate(ex, ey);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-8, -4);
+      ctx.lineTo(-8, 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
   }
 
   // Draw snap indicator lines
@@ -1220,16 +1285,27 @@ function pointInPolygon(px, py, polygon) {
 }
 
 function hitTest(canvasX, canvasY) {
-  const [wx, wy] = canvasToWorld(canvasX, canvasY);
-  // Check door/passage nodes by centroid proximity
+  // Use a screen-space (pixel) proximity test for door-like nodes; this
+  // avoids subtle world-space conversion issues and is more reliable for
+  // pointer hit detection on high-DPI displays and dynamic transforms.
   for (let i = state.spaces.length - 1; i >= 0; i--) {
     const s = state.spaces[i];
-    if ((!s.polygon || s.polygon.length < 3) &&
-        s.space_type && (s.space_type.startsWith('DOOR_') || s.space_type === 'PASSAGE') &&
-        s.centroid_x != null && s.centroid_y != null) {
-      const dx = Math.abs(wx - s.centroid_x);
-      const dy = Math.abs(wy - s.centroid_y);
-      if (dx < 1.5 && dy < 1.0) return s;
+    if ((!s.polygon || s.polygon.length < 3) && s.centroid_x != null && s.centroid_y != null && s.space_type) {
+      const st = String(s.space_type || '').toUpperCase();
+      if (st.includes('DOOR') || st === 'PASSAGE') {
+        try {
+          const [cx, cy] = worldToCanvas(s.centroid_x, s.centroid_y);
+          const distPx = Math.hypot(canvasX - cx, canvasY - cy);
+          if (distPx <= 12) return s; // 12px hit radius
+        } catch (e) {
+          // fall back to previous world-space check if conversion fails
+          const [wx, wy] = canvasToWorld(canvasX, canvasY);
+          const [wx2] = canvasToWorld(canvasX + 8, canvasY);
+          const worldRadius = Math.max(0.5, Math.abs(wx2 - wx));
+          const dist = Math.hypot(wx - s.centroid_x, wy - s.centroid_y);
+          if (dist < worldRadius * 1.5) return s;
+        }
+      }
     }
   }
   // Existing polygon hit test
@@ -1246,6 +1322,23 @@ function hitTest(canvasX, canvasY) {
    ═══════════════════════════════════════════════ */
 canvas.addEventListener('mousedown', e => {
   if (e.button !== 0) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  // Debug: log coordinates and hit test result to help diagnose click issues
+  console.debug('[mouse] down', Math.round(mx), Math.round(my));
+  if (state.mode !== 'moveSpace') {
+    const hit = hitTest(mx, my);
+    console.debug('[mouse] hitTest ->', hit ? { id: hit.id, type: hit.space_type, cx: hit.centroid_x, cy: hit.centroid_y } : null);
+    // If clicking a door-like node, enter move mode for that node instead
+    if (hit && (!hit.polygon || hit.polygon.length < 3) && (String(hit.space_type || '').toUpperCase().includes('DOOR') || String(hit.space_type || '').toUpperCase() === 'PASSAGE')) {
+      startMoveMode(hit);
+      // Don't set pan-dragging; move is handled by the moveSpace mousemove branch
+      return;
+    }
+  }
+
   if (state.mode === 'moveSpace') return;
   state.isDragging = true;
   state.dragStart = { x: e.clientX, y: e.clientY };
@@ -1279,6 +1372,8 @@ canvas.addEventListener('mousemove', e => {
   // Move mode: update space position with snapping
   if (state.mode === 'moveSpace' && state.moveSpace) {
     const [rawWx, rawWy] = canvasToWorld(mx, my);
+    const s = state.moveSpace;
+    console.debug('[move] dragging', s.id, rawWx.toFixed(2), rawWy.toFixed(2));
     if (state.moveOrigPoly) {
       const origBB = getSpaceBBox({ polygon: state.moveOrigPoly });
       const halfW = (origBB.maxX - origBB.minX) / 2;
@@ -1290,9 +1385,79 @@ canvas.addEventListener('mousemove', e => {
       state.moveSpace.centroid_x = sx;
       state.moveSpace.centroid_y = sy;
     } else {
-      state.moveSpace.centroid_x = rawWx;
-      state.moveSpace.centroid_y = rawWy;
+      // If this is a door-like node (no polygon), snap its centroid to the
+      // nearest wall edge of its adjacent space(s) so the door sits on the
+      // boundary rather than free-floating in the middle of the arrow.
+      if ((!s.polygon || s.polygon.length < 3) && (String(s.space_type || '').toUpperCase().includes('DOOR') || String(s.space_type || '').toUpperCase() === 'PASSAGE')) {
+        const candidates = [];
+        if (s.metadata) {
+          if (s.metadata.preview_from) {
+            const a = findSpaceById(s.metadata.preview_from);
+            if (a && a.polygon && a.polygon.length >= 3) candidates.push(a);
+          }
+          if (s.metadata.preview_to) {
+            const b = findSpaceById(s.metadata.preview_to);
+            if (b && b.polygon && b.polygon.length >= 3) candidates.push(b);
+          }
+        }
+        if (candidates.length === 0) {
+          const nearest = pickNearestPolygonForPoint(rawWx, rawWy);
+          if (nearest) candidates.push(nearest);
+        }
+
+        let bestProj = [rawWx, rawWy];
+        let bestD = Infinity;
+        for (const cand of candidates) {
+          const proj = closestPointOnPolygonBoundary(cand.polygon, rawWx, rawWy);
+          const d = Math.hypot(rawWx - proj[0], rawWy - proj[1]);
+          if (d < bestD) { bestD = d; bestProj = proj; }
+        }
+        state.moveSpace.centroid_x = bestProj[0];
+        state.moveSpace.centroid_y = bestProj[1];
+      } else {
+        state.moveSpace.centroid_x = rawWx;
+        state.moveSpace.centroid_y = rawWy;
+      }
     }
+
+    // Propagate moved door positions into the rendered connections so
+    // arrows visually follow the moved box while editing.
+      try {
+        for (const conn of (state.connections || [])) {
+          if (!conn) continue;
+          const sid = s.id;
+          // If this door node is actually a space participating in the
+          // connection (rare), update the endpoint coords directly.
+          if (conn.from_id === sid || conn.from_space_id === sid || conn.from === sid) {
+            conn.from_cx = s.centroid_x; conn.from_cy = s.centroid_y;
+          }
+          if (conn.to_id === sid || conn.to_space_id === sid || conn.to === sid) {
+            conn.to_cx = s.centroid_x; conn.to_cy = s.centroid_y;
+          }
+
+          // If this door was synthesized for a preview connection, map it
+          // to the corresponding connection row either by index or by
+          // matching preview_from/preview_to space ids.
+          if (s.metadata) {
+            if (s.metadata.preview_connection_index != null) {
+              const idx = s.metadata.preview_connection_index;
+              if (state.connections[idx]) {
+                state.connections[idx].door_cx = s.centroid_x;
+                state.connections[idx].door_cy = s.centroid_y;
+              }
+            }
+            const pf = s.metadata.preview_from, pt = s.metadata.preview_to;
+            if (pf && pt) {
+              if ((conn.from_id === pf && conn.to_id === pt) || (conn.from_id === pt && conn.to_id === pf) ||
+                  (conn.from_space_id === pf && conn.to_space_id === pt) || (conn.from_space_id === pt && conn.to_space_id === pf)) {
+                conn.door_cx = s.centroid_x;
+                conn.door_cy = s.centroid_y;
+              }
+            }
+          }
+        }
+      } catch (e) { console.warn('failed updating connection preview coords', e); }
+
     render();
     return;
   }
@@ -1588,6 +1753,57 @@ $('floor-select').addEventListener('change', async function() {
 async function loadFloorConnections(floorId) {
   try {
     state.connections = await api(`/floors/${floorId}/connections`);
+
+    // Ensure door-like preview nodes exist for connections that don't
+    // already have a nearby explicit door node. This creates preview
+    // nodes only where needed so editors can see and move connection
+    // endpoints even when the DB doesn't expose door spaces.
+    const spaceMap = {};
+    for (const s of state.spaces) spaceMap[s.id] = s;
+    const synth = [];
+    const conns = state.connections || [];
+    for (let ci = 0; ci < conns.length; ci++) {
+      const c = conns[ci];
+      const fromId = c.from_id || c.from_space_id || c.from;
+      const toId = c.to_id || c.to_space_id || c.to;
+      const a = spaceMap[fromId];
+      const b = spaceMap[toId];
+      if (!a || !b) continue;
+      if (a.centroid_x == null || b.centroid_x == null) continue;
+      const dx = (a.centroid_x + b.centroid_x) / 2.0;
+      const dy = (a.centroid_y + b.centroid_y) / 2.0;
+      // Skip if there's already a door-like space very close to this midpoint
+      const nearby = state.spaces.some(s => s.centroid_x != null && s.centroid_y != null && (String(s.space_type || '').toUpperCase().includes('DOOR') || String(s.space_type || '').toUpperCase() === 'PASSAGE') && Math.hypot(s.centroid_x - dx, s.centroid_y - dy) < 0.5);
+      if (nearby) continue;
+      const doorId = `synth_conn_${ci}`;
+      const stype = (c.connection_type && String(c.connection_type).toUpperCase().startsWith('DOOR')) ? c.connection_type : 'DOOR_STANDARD';
+      synth.push({
+        id: doorId,
+        display_name: '',
+        space_type: stype,
+        centroid_x: dx,
+        centroid_y: dy,
+        polygon: null,
+        is_accessible: c.is_accessible ?? true,
+        metadata: { synthesized: true, preview: true, preview_from: fromId, preview_to: toId, preview_connection_index: ci },
+      });
+    }
+    if (synth.length) {
+      state.spaces = [...state.spaces, ...synth];
+      // Ensure the UI updates after synthesizing nodes
+      fitToCanvas();
+      // Log synthesized door nodes (world + canvas coords) for debugging
+      try {
+        const list = synth.map(d => {
+          const [cx, cy] = worldToCanvas(d.centroid_x, d.centroid_y);
+          return { id: d.id, world_x: d.centroid_x, world_y: d.centroid_y, canvas_x: Math.round(cx), canvas_y: Math.round(cy) };
+        });
+        console.log('[map] Synthesized door nodes', list);
+      } catch (e) { console.debug('[map] Synth log failed', e); }
+      updateMapVisibility();
+    }
+    // Always re-render when connections change so arrows/boxes appear
+    render();
   } catch (e) {
     state.connections = [];
   }
@@ -1816,6 +2032,93 @@ $('dxf-preview-btn').addEventListener('click', async () => {
     const result = await api(`/campuses/import-dxf`, { method: 'POST', body: fd });
     notify(`Preview: ${result.rooms_detected} rooms — ${summarizeClassification(result.classification_summary)}`);
     reportDxfWarnings(result.warnings);
+
+    // If the backend returned a full preview schema, render it
+    // temporarily so the editor can inspect/move spaces and
+    // see inferred connections before committing the import.
+    if (result.preview_schema) {
+      const p = result.preview_schema;
+      const spacesRaw = Array.isArray(p)
+        ? p
+        : (p.campus && p.campus.buildings && p.campus.buildings[0] && p.campus.buildings[0].floors && p.campus.buildings[0].floors[0]
+            ? p.campus.buildings[0].floors[0].spaces || []
+            : []);
+
+      // Backup current display state so it can be restored if needed
+      state._preview_backup = { spaces: state.spaces, connections: state.connections };
+
+      // Flatten initial spaces
+      let flattened = flattenSpaces(spacesRaw);
+
+      // Build preview connections from centroids so rendering matches
+      // the DB endpoint shape (`from_cx/from_cy`, `to_cx/to_cy`).
+      let previewConns = result.preview_connections || [];
+      if ((!previewConns || previewConns.length === 0) && p.campus && p.campus.connections) {
+        const spaceMap = {};
+        for (const s of flattened) spaceMap[s.id] = s;
+        previewConns = p.campus.connections.map(c => {
+          const fromId = c.from_space_id || c.from_id || c.from;
+          const toId = c.to_space_id || c.to_id || c.to;
+          const from = spaceMap[fromId] || {};
+          const to = spaceMap[toId] || {};
+          return {
+            from_id: fromId,
+            to_id: toId,
+            from_cx: from.centroid_x ?? null,
+            from_cy: from.centroid_y ?? null,
+            to_cx: to.centroid_x ?? null,
+            to_cy: to.centroid_y ?? null,
+            connection_type: c.connection_type,
+            is_accessible: c.is_accessible ?? true,
+          };
+        }).filter(pc => pc.from_cx != null && pc.to_cx != null);
+      }
+
+      // Synthesize door node spaces at connection midpoints so the
+      // editor can render the small door boxes (these are preview-only
+      // and won't be persisted).
+      const doorNodes = [];
+      for (let i = 0; i < (previewConns || []).length; i++) {
+        const c = previewConns[i];
+        if (!c || c.from_cx == null || c.to_cx == null) continue;
+        const dx = (c.from_cx + c.to_cx) / 2.0;
+        const dy = (c.from_cy + c.to_cy) / 2.0;
+        // Skip if a real space centroid is already very close
+        const close = flattened.some(s => typeof s.centroid_x === 'number' && Math.hypot(s.centroid_x - dx, s.centroid_y - dy) < 0.5);
+        if (close) continue;
+        const doorId = `preview_door_${i}`;
+        const stype = (c.connection_type && c.connection_type.startsWith('DOOR')) ? c.connection_type : 'DOOR_STANDARD';
+        doorNodes.push({
+          id: doorId,
+          display_name: '',
+          space_type: stype,
+          centroid_x: dx,
+          centroid_y: dy,
+          polygon: null,
+          is_accessible: c.is_accessible ?? true,
+          metadata: { preview: true, preview_connection_index: i, preview_from: c.from_id, preview_to: c.to_id },
+        });
+      }
+
+      // Combine spaces + door nodes and mark as preview so moves don't persist
+      const combined = [...spacesRaw, ...doorNodes];
+      state.spaces = flattenSpaces(combined).map(s => { s.metadata = s.metadata || {}; s.metadata.preview = true; return s; });
+
+      state.connections = previewConns || [];
+      state._isPreview = true;
+      fitToCanvas();
+      // Log preview door nodes with canvas coordinates to help debugging
+      try {
+        const list = doorNodes.map(d => {
+          const [cx, cy] = worldToCanvas(d.centroid_x, d.centroid_y);
+          return { id: d.id, world_x: d.centroid_x, world_y: d.centroid_y, canvas_x: Math.round(cx), canvas_y: Math.round(cy) };
+        });
+        if (list.length) console.log('[map] Preview door nodes', list);
+      } catch (e) { console.debug('[map] preview door log failed', e); }
+      updateMapVisibility();
+      render();
+      notify('DXF preview loaded (temporary). Move items to adjust; nothing is saved.', 'info');
+    }
   } catch (e) {
     /* notify already called by api() */
   } finally {
@@ -2313,6 +2616,56 @@ function polygonCentroid(polygon) {
     return [mean[0] / polygon.length, mean[1] / polygon.length];
   }
   return [cx / (6 * area), cy / (6 * area)];
+}
+
+/** Geometry helpers: projection onto segments / polygon boundary */
+function closestPointOnSegment(ax, ay, bx, by, px, py) {
+  const vx = bx - ax, vy = by - ay;
+  const wx = px - ax, wy = py - ay;
+  const l2 = vx * vx + vy * vy;
+  if (l2 === 0) return [ax, ay];
+  let t = (vx * wx + vy * wy) / l2;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  return [ax + t * vx, ay + t * vy];
+}
+
+function closestPointOnPolygonBoundary(polygon, px, py) {
+  if (!polygon || polygon.length < 2) return [px, py];
+  let best = null, bestD = Infinity;
+  // polygon may or may not repeat the first point at the end — iterate wrapped edges
+  const n = polygon.length;
+  for (let i = 0; i < n; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % n];
+    const proj = closestPointOnSegment(a[0], a[1], b[0], b[1], px, py);
+    const d = Math.hypot(px - proj[0], py - proj[1]);
+    if (d < bestD) { bestD = d; best = proj; }
+  }
+  return best || [polygon[0][0], polygon[0][1]];
+}
+
+function minDistPointToPolygon(px, py, polygon) {
+  if (!polygon || polygon.length < 2) return Infinity;
+  let bestD = Infinity;
+  const n = polygon.length;
+  for (let i = 0; i < n; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % n];
+    const proj = closestPointOnSegment(a[0], a[1], b[0], b[1], px, py);
+    const d = Math.hypot(px - proj[0], py - proj[1]);
+    if (d < bestD) bestD = d;
+  }
+  return bestD;
+}
+
+function pickNearestPolygonForPoint(px, py) {
+  let best = null, bestD = Infinity;
+  for (const s of state.spaces) {
+    if (!s.polygon || s.polygon.length < 3) continue;
+    const d = minDistPointToPolygon(px, py, s.polygon);
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  return best;
 }
 
 function snapToAxis(prevX, prevY, cursorX, cursorY, thresholdDeg = 10) {
@@ -2846,6 +3199,7 @@ function startMoveMode(space) {
   state.moveOrigPoly = space.polygon ? space.polygon.map(p => [...p]) : null;
   state.moveOrigCentroid = [space.centroid_x, space.centroid_y];
   canvas.classList.add('crosshair');
+  console.log('[move] startMoveMode', space.id, space.centroid_x, space.centroid_y, space.metadata && space.metadata.preview ? 'preview' : 'persisted');
   for (const btn of document.querySelectorAll('.tool-bar button')) {
     btn.classList.remove('active');
   }
@@ -2857,7 +3211,15 @@ async function finishMove() {
   const space = state.moveSpace;
   if (!space) return;
   state.snapLines = [];
+  console.log('[move] finishMove', space.id, space.centroid_x, space.centroid_y, space.metadata && space.metadata.preview ? 'preview' : 'persisted');
   try {
+    // If this is a preview-only space, do not persist changes to the backend.
+    if (space.metadata && space.metadata.preview) {
+      notify(`Moved "${space.display_name || 'preview item'}" (preview)`);
+      exitMoveMode();
+      return;
+    }
+
     const body = { centroid_x: space.centroid_x, centroid_y: space.centroid_y };
     if (space.polygon) body.polygon = space.polygon;
     await api(`/spaces/${space.id}`, {

@@ -83,7 +83,8 @@ class ConnectionRepository:
     def list_connections_for_floor(self, floor_id: str) -> list[dict]:
         result = self.db.execute(
             """
-            MATCH (a:Space {floor_id: $floor_id})-[:CONNECTS_TO]->(b:Space {floor_id: $floor_id})
+            MATCH (f:Floor {id: $floor_id})-[:HAS_SPACE]->(a:Space)-[:CONNECTS_TO]->(b:Space)
+            MATCH (f)-[:HAS_SPACE]->(b)
             RETURN a.id AS from_id, b.id AS to_id,
                    a.centroid_x AS from_cx, a.centroid_y AS from_cy,
                    b.centroid_x AS to_cx, b.centroid_y AS to_cy

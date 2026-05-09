@@ -1,5 +1,5 @@
 from typing import Optional, Union
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, model_validator, validator
 from shared.models.enums import ConnectionType, DoorType, SpaceType, EntityType
 
 
@@ -93,7 +93,10 @@ class ConnectionNodeImport(BaseModel):
     @validator('connection_type', pre=True)
     def validate_connection_type(cls, v):
         if isinstance(v, str):
-            return ConnectionType(v)
+            up = v.upper()
+            if up.startswith("DOOR_") and up != "DOOR_TYPE":
+                return ConnectionType.DOOR
+            return ConnectionType(up)
         return v
 
     @validator('door_type', pre=True)
@@ -103,8 +106,20 @@ class ConnectionNodeImport(BaseModel):
         if isinstance(v, str):
             if v.upper() == "NONE":
                 return None
-            return DoorType(v)
+            return DoorType(v.upper())
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _recover_door_type_from_legacy_connection_type(cls, data):
+        if not isinstance(data, dict):
+            return data
+        ct = data.get("connection_type")
+        if isinstance(ct, str) and ct.upper().startswith("DOOR_"):
+            suffix = ct.upper().split("DOOR_", 1)[1]
+            if not data.get("door_type"):
+                data["door_type"] = suffix
+        return data
 
 
 class CampusImport(BaseModel):
