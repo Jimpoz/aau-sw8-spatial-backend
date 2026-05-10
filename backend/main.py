@@ -26,6 +26,8 @@ from routes import (
 )
 from scripts.init_db import apply_schema
 from services.postgis_service import PostGISService
+from services.sync_outbox import get_worker as get_sync_outbox_worker
+from routes import admin as admin_routes
 
 
 def _check_jwt_secret_strength() -> None:
@@ -46,8 +48,13 @@ async def lifespan(app: FastAPI):
     apply_schema(db)
     if settings.auth_rls_enabled:
         PostGISService().apply_rls_policies()
-    yield
-    db.close()
+    worker = get_sync_outbox_worker()
+    worker.start()
+    try:
+        yield
+    finally:
+        await worker.stop()
+        db.close()
 
 
 app = FastAPI(
@@ -104,6 +111,7 @@ app.include_router(spaces.router, prefix=PREFIX)
 app.include_router(connections.router, prefix=PREFIX)
 app.include_router(navigation.router, prefix=PREFIX)
 app.include_router(search.router, prefix=PREFIX)
+app.include_router(admin_routes.router, prefix=PREFIX)
 
 if settings.auth_jwt_secret:
     app.include_router(auth.router, prefix=PREFIX)

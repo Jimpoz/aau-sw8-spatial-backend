@@ -34,12 +34,15 @@ def seed_organizations(pg: PostGISService) -> list[dict]:
         if not org["id"]:
             print(f"[seed_users] Skipping org with no id: {node!r}")
             continue
-        ok = pg.sync_organization(org)
-        if ok:
-            print(f"[seed_users] Upserted org: {org['id']} ({org['name']})")
-            seeded.append(org)
-        else:
-            print(f"[seed_users] Failed to sync org: {org['id']}")
+        # CLI script: bypass the sync outbox and write directly so the
+        # subsequent owner-bootstrap step can read the org back immediately.
+        try:
+            pg._apply_sync_organization(org)
+        except Exception as exc:
+            print(f"[seed_users] Failed to sync org {org['id']}: {exc}")
+            continue
+        print(f"[seed_users] Upserted org: {org['id']} ({org['name']})")
+        seeded.append(org)
     return seeded
 
 

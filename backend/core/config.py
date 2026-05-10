@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     )
     supabase_enable_sync: bool = True
 
+    sync_outbox_poll_interval_s: float = 2.0
+    sync_outbox_base_backoff_s: float = 5.0
+    sync_outbox_batch_size: int = 50
+    sync_outbox_max_attempts: int = 0
+
     auth_jwt_secret: str | None = None
     auth_jwt_issuer: str = "ariadne-backend"
     auth_jwt_ttl_seconds: int = 60 * 60 * 12  # 12h

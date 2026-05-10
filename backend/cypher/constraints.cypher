@@ -4,3 +4,4 @@ CREATE CONSTRAINT building_id_unique IF NOT EXISTS FOR (b:Building) REQUIRE b.id
 CREATE CONSTRAINT floor_id_unique IF NOT EXISTS FOR (f:Floor) REQUIRE f.id IS UNIQUE;
 CREATE CONSTRAINT space_id_unique IF NOT EXISTS FOR (s:Space) REQUIRE s.id IS UNIQUE;
 CREATE CONSTRAINT landmark_id_unique IF NOT EXISTS FOR (l:Landmark) REQUIRE l.id IS UNIQUE;
+CREATE CONSTRAINT sync_outbox_id_unique IF NOT EXISTS FOR (o:SyncOutbox) REQUIRE o.id IS UNIQUE;
