@@ -42,6 +42,20 @@ class ConnectionRepository:
         "PASSAGE", "OPEN", "STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP",
     ]
 
+    def find_door_spaces_between(
+        self, room_a_id: str, room_b_id: str
+    ) -> list[str]:
+        """Return ids of every door-like Space sitting between two rooms."""
+        result = self.db.execute(
+            """
+            MATCH (a:Space {id: $a})-[:CONNECTS_TO]-(d:Space)-[:CONNECTS_TO]-(b:Space {id: $b})
+            WHERE d.space_type IN $conn_types AND d.id <> $a AND d.id <> $b
+            RETURN DISTINCT d.id AS id
+            """,
+            {"a": room_a_id, "b": room_b_id, "conn_types": self._CONN_TYPES},
+        )
+        return [r["id"] for r in result]
+
     def list_connections_for_space(self, space_id: str) -> list[dict]:
         # Determine if this space is itself a connection node
         type_result = self.db.execute(

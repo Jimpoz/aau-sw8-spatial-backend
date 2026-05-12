@@ -69,8 +69,14 @@ def delete_organization(
             OrganizationRepository(db).get_organization(organization_id)
         except OrganizationNotFound as e:
             raise HTTPException(status_code=404, detail=str(e))
-        OrganizationRepository(db).delete_organization(organization_id)
-        PostGISService().delete_organization(organization_id)
+        result = OrganizationRepository(db).delete_organization(organization_id)
+        PostGISService().delete_organization_cascade(
+            organization_id=result["organization_id"],
+            campus_ids=result["campus_ids"],
+            building_ids=result["building_ids"],
+            floor_pks=result["floor_pks"],
+            space_ids=result["space_ids"],
+        )
 
 
 @router.get("/enums/entity-types")

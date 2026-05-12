@@ -110,8 +110,10 @@ def _build_dispatch() -> dict[str, Callable[[Any, dict[str, Any]], Any]]:
     return {
         "sync_organization": call("_apply_sync_organization"),
         "delete_organization": call("_apply_delete_organization"),
+        "delete_organization_cascade": call("_apply_delete_organization_cascade"),
         "sync_campus": call("_apply_sync_campus"),
         "delete_campus": call("_apply_delete_campus"),
+        "delete_campus_cascade": call("_apply_delete_campus_cascade"),
         "sync_building": call("_apply_sync_building"),
         "delete_building": call("_apply_delete_building"),
         "delete_building_cascade": call("_apply_delete_building_cascade"),

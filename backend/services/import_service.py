@@ -13,6 +13,7 @@ from shared.models.enums import SpaceType
 from repositories.campus_repo import CampusRepository, OrganizationRepository
 from repositories.space_repo import SpaceRepository
 from repositories.connection_repo import ConnectionRepository
+from core.exceptions import SpaceNotFound
 from services.geometry_service import (
     centroid_from_polygon,
     area_from_polygon,
@@ -42,17 +43,29 @@ class ImportService:
         organization = schema.organization
         organization_id = None
         if organization is not None:
-            organization_id = organization.id
-            self.org_repo.create_organization(
-                OrganizationCreate(
-                    id=organization.id,
-                    name=organization.name,
-                    entity_type=organization.entity_type,
-                    description=organization.description,
+            existing_by_name = self._find_org_by_name(organization.name)
+            if existing_by_name:
+                organization_id = existing_by_name["id"]
+                self.org_repo.create_organization(
+                    OrganizationCreate(
+                        id=organization_id,
+                        name=organization.name,
+                        entity_type=organization.entity_type,
+                        description=organization.description,
+                    )
                 )
-            )
+            else:
+                organization_id = organization.id
+                self.org_repo.create_organization(
+                    OrganizationCreate(
+                        id=organization.id,
+                        name=organization.name,
+                        entity_type=organization.entity_type,
+                        description=organization.description,
+                    )
+                )
             self.postgis.sync_organization({
-                "id": organization.id,
+                "id": organization_id,
                 "name": organization.name,
                 "entity_type": organization.entity_type,
                 "description": organization.description,
@@ -187,18 +200,73 @@ class ImportService:
                 parent_id=None,
             )
 
-        # 4. Connection nodes
-        counts = {"spaces": len(self._centroids), "connections": 0}
+        counts = {
+            "spaces": len(self._centroids),
+            "connections": 0,
+            "connections_skipped": 0,
+        }
+        endpoint_ids = list({
+            cid
+            for conn in campus.connections
+            for cid in (conn.from_space_id, conn.to_space_id)
+            if cid
+        })
+        known_space_ids: set[str] = set()
+        if endpoint_ids:
+            rows = self.space_repo.db.execute(
+                "MATCH (s:Space) WHERE s.id IN $ids RETURN s.id AS id",
+                {"ids": endpoint_ids},
+            )
+            known_space_ids = {r["id"] for r in rows if r.get("id")}
+
         for conn in campus.connections:
-            self._import_connection_node(conn)
-            counts["connections"] += 1
+            if (
+                conn.from_space_id not in known_space_ids
+                or conn.to_space_id not in known_space_ids
+            ):
+                counts["connections_skipped"] += 1
+                continue
+            try:
+                self._import_connection_node(conn)
+                counts["connections"] += 1
+            except Exception as exc:
+                counts["connections_skipped"] += 1
+                print(
+                    f"[ImportService] Skipped connection "
+                    f"{conn.from_space_id}→{conn.to_space_id}: {exc}"
+                )
 
         return {
             "organization_id": organization_id,
             "campus_id": campus.id,
             "spaces_imported": counts["spaces"],
             "connections_imported": counts["connections"],
+            "connections_skipped": counts["connections_skipped"],
         }
+
+    def _find_org_by_name(self, name: str) -> dict | None:
+        """Case-insensitive lookup by Organization.name.
+
+        Used by import_map so re-imports of the same institution under a
+        different id don't fork into a duplicate organization. Returns
+        the first match (sorted by id for determinism) or None if no
+        organization shares the name."""
+        if not name:
+            return None
+        rows = self.org_repo.db.execute(
+            """
+            MATCH (o:Organization)
+            WHERE toLower(o.name) = toLower($name)
+            RETURN o
+            ORDER BY o.id ASC
+            LIMIT 1
+            """,
+            {"name": name},
+        )
+        if rows:
+            org = rows[0]["o"]
+            return dict(org) if not isinstance(org, dict) else org
+        return None
 
     def _import_space(
         self,
@@ -345,6 +413,8 @@ class ImportService:
             to_space_id=conn.to_space_id,
             connection_type=ct,
             is_accessible=bool(getattr(conn, "is_accessible", True)),
+            door_cx=getattr(conn, "door_cx", None),
+            door_cy=getattr(conn, "door_cy", None),
         )
 
     def _create_door_space_connection(
@@ -409,7 +479,9 @@ class ImportService:
         if conn.weight_override is not None:
             meta["weight_override"] = conn.weight_override
 
-        door_id = f"door_{uuid.uuid4().hex[:12]}"
+        sorted_endpoints = sorted([conn.from_space_id, conn.to_space_id])
+        door_id_seed = f"{ct_upper}:{sorted_endpoints[0]}:{sorted_endpoints[1]}"
+        door_id = f"door_{uuid.uuid5(uuid.NAMESPACE_URL, door_id_seed).hex[:12]}"
         traversal_cost = compute_traversal_cost(door_space_type.value, None, None, None)
 
         # Compute global coords if the building has an origin.
@@ -421,6 +493,17 @@ class ImportService:
                     cx, cy, building["origin_lat"], building["origin_lng"],
                     building.get("origin_bearing") or 0.0,
                 )
+
+        for stale_id in self.conn_repo.find_door_spaces_between(
+            conn.from_space_id, conn.to_space_id
+        ):
+            if stale_id == door_id:
+                continue
+            try:
+                self.space_repo.delete_space(stale_id)
+            except SpaceNotFound:
+                pass
+            self.postgis.delete_space(stale_id)
 
         is_accessible = bool(getattr(conn, "is_accessible", True))
         door_space = self.space_repo.create_space(
@@ -456,4 +539,6 @@ class ImportService:
             door_space_id=door_id,
             connection_type=door_space_type.value,
             is_accessible=is_accessible,
+            door_cx=cx,
+            door_cy=cy,
         )

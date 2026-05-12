@@ -360,14 +360,8 @@ class ImportRecord(Base):
 
 
 class SpaceConnection(Base):
-    """Directed mapmaker-created edge between two spaces via a door/passage.
+    """Directed mapmaker-created edge between two spaces via a door/passage."""
 
-    Mirror of the four Neo4j CONNECTS_TO edges that are produced when the user
-    wires a room to a corridor (or any two spaces) through a door in the mapmaker.
-    Stored as two rows per created connection: (from, door) and (door, to) for the
-    forward direction, and the inverse pair for the reverse direction. The
-    `connection_group_id` ties all four rows to the same user-created link so
-    the whole group can be removed atomically on delete."""
     __tablename__ = "space_connections"
 
     id = Column(String, primary_key=True)
@@ -377,6 +371,8 @@ class SpaceConnection(Base):
     door_space_id = Column(String, index=True)
     connection_type = Column(String)
     is_accessible = Column(Boolean, default=True)
+    door_cx = Column(Float)
+    door_cy = Column(Float)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -427,6 +423,8 @@ class PostGISService:
         ("buildings", "is_public", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ("floors", "is_public", "BOOLEAN NOT NULL DEFAULT FALSE"),
         ("app_users", "mfa_method", "VARCHAR NOT NULL DEFAULT 'totp'"),
+        ("space_connections", "door_cx", "DOUBLE PRECISION"),
+        ("space_connections", "door_cy", "DOUBLE PRECISION"),
     )
 
     def _ensure_columns(self) -> None:
@@ -552,6 +550,70 @@ class PostGISService:
             session.commit()
         session.close()
 
+    def delete_organization_cascade(
+        self,
+        organization_id: str,
+        campus_ids: list[str],
+        building_ids: list[str],
+        floor_pks: list[str],
+        space_ids: list[str],
+    ) -> bool:
+        """Cascade-delete an organization and every descendant row in PostGIS."""
+        from services.sync_outbox import enqueue
+        return enqueue("delete_organization_cascade", {
+            "organization_id": organization_id,
+            "campus_ids": list(campus_ids),
+            "building_ids": list(building_ids),
+            "floor_pks": list(floor_pks),
+            "space_ids": list(space_ids),
+        })
+
+    def _apply_delete_organization_cascade(
+        self,
+        organization_id: str,
+        campus_ids: list[str],
+        building_ids: list[str],
+        floor_pks: list[str],
+        space_ids: list[str],
+    ) -> None:
+        session = self._open_session()
+
+        if space_ids:
+            session.query(SpaceConnection).filter(
+                or_(
+                    SpaceConnection.from_space_id.in_(space_ids),
+                    SpaceConnection.to_space_id.in_(space_ids),
+                    SpaceConnection.door_space_id.in_(space_ids),
+                    SpaceConnection.connection_group_id.in_(space_ids),
+                )
+            ).delete(synchronize_session=False)
+
+            session.query(BuildingSpace).filter(
+                BuildingSpace.id.in_(space_ids)
+            ).delete(synchronize_session=False)
+
+        if floor_pks:
+            session.query(Floor).filter(
+                Floor.id.in_(floor_pks)
+            ).delete(synchronize_session=False)
+
+        if building_ids:
+            session.query(Building).filter(
+                Building.id.in_(building_ids)
+            ).delete(synchronize_session=False)
+
+        if campus_ids:
+            session.query(Campus).filter(
+                Campus.id.in_(campus_ids)
+            ).delete(synchronize_session=False)
+
+        session.query(Organization).filter_by(id=organization_id).delete(
+            synchronize_session=False
+        )
+
+        session.commit()
+        session.close()
+
     # --- campuses ---
 
     def sync_campus(self, campus_data: dict) -> bool:
@@ -592,6 +654,62 @@ class PostGISService:
         if record:
             session.delete(record)
             session.commit()
+        session.close()
+
+    def delete_campus_cascade(
+        self,
+        campus_id: str,
+        building_ids: list[str],
+        floor_pks: list[str],
+        space_ids: list[str],
+    ) -> bool:
+        """Cascade-delete a campus and every descendant row in PostGIS."""
+        from services.sync_outbox import enqueue
+        return enqueue("delete_campus_cascade", {
+            "campus_id": campus_id,
+            "building_ids": list(building_ids),
+            "floor_pks": list(floor_pks),
+            "space_ids": list(space_ids),
+        })
+
+    def _apply_delete_campus_cascade(
+        self,
+        campus_id: str,
+        building_ids: list[str],
+        floor_pks: list[str],
+        space_ids: list[str],
+    ) -> None:
+        session = self._open_session()
+
+        if space_ids:
+            session.query(SpaceConnection).filter(
+                or_(
+                    SpaceConnection.from_space_id.in_(space_ids),
+                    SpaceConnection.to_space_id.in_(space_ids),
+                    SpaceConnection.door_space_id.in_(space_ids),
+                    SpaceConnection.connection_group_id.in_(space_ids),
+                )
+            ).delete(synchronize_session=False)
+
+            session.query(BuildingSpace).filter(
+                BuildingSpace.id.in_(space_ids)
+            ).delete(synchronize_session=False)
+
+        if floor_pks:
+            session.query(Floor).filter(
+                Floor.id.in_(floor_pks)
+            ).delete(synchronize_session=False)
+
+        if building_ids:
+            session.query(Building).filter(
+                Building.id.in_(building_ids)
+            ).delete(synchronize_session=False)
+
+        session.query(Campus).filter_by(id=campus_id).delete(
+            synchronize_session=False
+        )
+
+        session.commit()
         session.close()
 
     # --- buildings ---
@@ -906,6 +1024,8 @@ class PostGISService:
         door_space_id: str,
         connection_type: str | None,
         is_accessible: bool = True,
+        door_cx: float | None = None,
+        door_cy: float | None = None,
     ) -> bool:
         """Mirror the four CONNECTS_TO edges produced by create_connection() as
         rows in space_connections."""
@@ -916,6 +1036,8 @@ class PostGISService:
             "door_space_id": door_space_id,
             "connection_type": connection_type,
             "is_accessible": is_accessible,
+            "door_cx": door_cx,
+            "door_cy": door_cy,
         })
 
     def _apply_sync_connection(
@@ -925,6 +1047,8 @@ class PostGISService:
         door_space_id: str,
         connection_type: str | None,
         is_accessible: bool = True,
+        door_cx: float | None = None,
+        door_cy: float | None = None,
     ) -> None:
         session = self._open_session()
         group_id = door_space_id
@@ -945,6 +1069,8 @@ class PostGISService:
                 door_space_id=door_space_id,
                 connection_type=connection_type,
                 is_accessible=is_accessible,
+                door_cx=door_cx,
+                door_cy=door_cy,
             ))
         session.commit()
         session.close()
@@ -966,6 +1092,8 @@ class PostGISService:
         to_space_id: str,
         connection_type: str | None = None,
         is_accessible: bool = True,
+        door_cx: float | None = None,
+        door_cy: float | None = None,
     ) -> bool:
         """Mirror a single direct CONNECTS_TO edge (no intermediate door node)
         into space_connections. Used by bulk import where the schema describes
@@ -976,6 +1104,8 @@ class PostGISService:
             "to_space_id": to_space_id,
             "connection_type": connection_type,
             "is_accessible": is_accessible,
+            "door_cx": door_cx,
+            "door_cy": door_cy,
         })
 
     def _apply_sync_direct_edge(
@@ -984,6 +1114,8 @@ class PostGISService:
         to_space_id: str,
         connection_type: str | None = None,
         is_accessible: bool = True,
+        door_cx: float | None = None,
+        door_cy: float | None = None,
     ) -> None:
         session = self._open_session()
         row_id = f"direct:{from_space_id}->{to_space_id}"
@@ -991,6 +1123,9 @@ class PostGISService:
         if existing:
             existing.connection_type = connection_type
             existing.is_accessible = is_accessible
+            if door_cx is not None and door_cy is not None:
+                existing.door_cx = door_cx
+                existing.door_cy = door_cy
         else:
             session.add(SpaceConnection(
                 id=row_id,
@@ -1000,9 +1135,112 @@ class PostGISService:
                 door_space_id=None,
                 connection_type=connection_type,
                 is_accessible=is_accessible,
+                door_cx=door_cx,
+                door_cy=door_cy,
             ))
         session.commit()
         session.close()
+
+    def get_direct_edge_door_positions(
+        self,
+        pairs: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], tuple[float, float]]:
+        """Look up persisted door positions for a batch of direct edges."""
+        if not self.engine or not settings.supabase_enable_sync or not pairs:
+            return {}
+        try:
+            session = self._open_session()
+            try:
+                endpoints: set[str] = set()
+                for a, b in pairs:
+                    endpoints.add(a)
+                    endpoints.add(b)
+                rows = (
+                    session.query(SpaceConnection)
+                    .filter(
+                        SpaceConnection.door_cx.isnot(None),
+                        SpaceConnection.door_cy.isnot(None),
+                        SpaceConnection.from_space_id.in_(endpoints),
+                        SpaceConnection.to_space_id.in_(endpoints),
+                    )
+                    .all()
+                )
+            finally:
+                session.close()
+            out: dict[tuple[str, str], tuple[float, float]] = {}
+            for r in rows:
+                pos = (float(r.door_cx), float(r.door_cy))
+                out[(r.from_space_id, r.to_space_id)] = pos
+                out[(r.to_space_id, r.from_space_id)] = pos
+            return out
+        except Exception as e:
+            print(f"Error fetching door positions: {e}")
+            return {}
+
+    def update_connection_door_position(
+        self,
+        from_space_id: str,
+        to_space_id: str,
+        door_cx: float,
+        door_cy: float,
+    ) -> bool:
+        """Persist a user-placed door position to space_connections."""
+        if not self.engine or not settings.supabase_enable_sync:
+            return False
+        try:
+            session = self._open_session()
+            try:
+                # Direct-edge rows. There can be one row per direction.
+                rows = (
+                    session.query(SpaceConnection)
+                    .filter(
+                        or_(
+                            (SpaceConnection.from_space_id == from_space_id) & (SpaceConnection.to_space_id == to_space_id),
+                            (SpaceConnection.from_space_id == to_space_id) & (SpaceConnection.to_space_id == from_space_id),
+                        )
+                    )
+                    .all()
+                )
+                touched = 0
+                for r in rows:
+                    r.door_cx = door_cx
+                    r.door_cy = door_cy
+                    touched += 1
+
+                # Door-pattern rows are keyed by the door's id; find all
+                # groups that link these two endpoints and update every row
+                # in the group so reads via either side pick up the position.
+                door_groups = (
+                    session.query(SpaceConnection.connection_group_id)
+                    .filter(
+                        SpaceConnection.connection_group_id.isnot(None),
+                        or_(
+                            SpaceConnection.from_space_id == from_space_id,
+                            SpaceConnection.from_space_id == to_space_id,
+                            SpaceConnection.to_space_id == from_space_id,
+                            SpaceConnection.to_space_id == to_space_id,
+                        ),
+                    )
+                    .distinct()
+                    .all()
+                )
+                group_ids = [g[0] for g in door_groups if g[0]]
+                for gid in group_ids:
+                    group_rows = session.query(SpaceConnection).filter_by(connection_group_id=gid).all()
+                    endpoints = {r.from_space_id for r in group_rows} | {r.to_space_id for r in group_rows}
+                    if from_space_id in endpoints and to_space_id in endpoints:
+                        for r in group_rows:
+                            r.door_cx = door_cx
+                            r.door_cy = door_cy
+                            touched += 1
+
+                session.commit()
+                return touched > 0
+            finally:
+                session.close()
+        except Exception as e:
+            print(f"Error updating door position {from_space_id}↔{to_space_id}: {e}")
+            return False
 
     def list_campus_connections(self, campus_id: str) -> list[dict]:
         """Return every space_connections row whose `from_space_id` belongs
@@ -1018,7 +1256,8 @@ class PostGISService:
                         """
                         SELECT sc.from_space_id, sc.to_space_id,
                                sc.connection_type, sc.is_accessible,
-                               sc.door_space_id
+                               sc.door_space_id,
+                               sc.door_cx, sc.door_cy
                           FROM space_connections sc
                           JOIN building_spaces bs ON bs.id = sc.from_space_id
                          WHERE bs.campus_id = :campus_id
@@ -1033,18 +1272,22 @@ class PostGISService:
             seen: set[tuple] = set()
 
             for r in rows:
-                from_id, to_id, ctype, is_acc, door_id = r[0], r[1], r[2], r[3], r[4]
+                from_id, to_id, ctype, is_acc, door_id, dcx, dcy = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
                 if door_id is None:
                     key = (from_id, to_id, ctype or "OPEN")
                     if key in seen:
                         continue
                     seen.add(key)
-                    out.append({
+                    row: dict = {
                         "from_space_id": from_id,
                         "to_space_id": to_id,
                         "connection_type": ctype or "OPEN",
                         "is_accessible": bool(is_acc) if is_acc is not None else True,
-                    })
+                    }
+                    if dcx is not None and dcy is not None:
+                        row["door_cx"] = float(dcx)
+                        row["door_cy"] = float(dcy)
+                    out.append(row)
 
             door_groups: dict[str, list] = {}
             for r in rows:
@@ -1057,8 +1300,10 @@ class PostGISService:
                 endpoints: set[str] = set()
                 group_conn_type = None
                 group_access = None
+                group_dcx = None
+                group_dcy = None
                 for r in group_rows:
-                    a, b, ctype, is_acc, _ = r[0], r[1], r[2], r[3], r[4]
+                    a, b, ctype, is_acc, _, dcx, dcy = r[0], r[1], r[2], r[3], r[4], r[5], r[6]
                     if a != door_id:
                         endpoints.add(a)
                     if b != door_id:
@@ -1067,6 +1312,9 @@ class PostGISService:
                         group_conn_type = ctype
                     if group_access is None and is_acc is not None:
                         group_access = bool(is_acc)
+                    if group_dcx is None and dcx is not None:
+                        group_dcx = float(dcx)
+                        group_dcy = float(dcy) if dcy is not None else None
 
                 endpoints_list = list(endpoints)
                 for i in range(len(endpoints_list)):
@@ -1079,13 +1327,17 @@ class PostGISService:
                         if key in seen:
                             continue
                         seen.add(key)
-                        out.append({
+                        row = {
                             "from_space_id": a,
                             "to_space_id": b,
                             "connection_type": group_conn_type or "DOOR",
                             "is_accessible": group_access if group_access is not None else True,
                             "door_id": door_id,
-                        })
+                        }
+                        if group_dcx is not None and group_dcy is not None:
+                            row["door_cx"] = group_dcx
+                            row["door_cy"] = group_dcy
+                        out.append(row)
 
             return out
         except Exception as e:

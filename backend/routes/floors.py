@@ -80,8 +80,6 @@ def list_spaces(floor_id: str, db: Database = Depends(get_db)):
 def floor_display(floor_id: str, db: Database = Depends(get_db)):
     """
     Return all spaces with polygons for iOS map overlay rendering.
-    Reads from PostGIS (Supabase) when available; falls back to Neo4j.
-    Returns a flat list matching the iOS SpaceDisplayItem decoder.
     """
     try:
         CampusRepository(db).get_floor(floor_id)
@@ -89,13 +87,12 @@ def floor_display(floor_id: str, db: Database = Depends(get_db)):
         raise HTTPException(status_code=404, detail=str(e))
 
     postgis = PostGISService()
-    spaces = postgis.get_floor_spaces(floor_id)
+    pg_spaces = postgis.get_floor_spaces(floor_id) or []
+    pg_ids = {s["id"] for s in pg_spaces if s.get("id")}
 
-    if spaces:
-        return spaces
-
-    neo4j_spaces = SpaceRepository(db).get_floor_display(floor_id)
-    return [
+    neo4j_spaces = SpaceRepository(db).get_floor_display(floor_id) or []
+    missing = [s for s in neo4j_spaces if s.get("id") and s["id"] not in pg_ids]
+    extras = [
         {
             "id": s["id"],
             "display_name": s.get("display_name"),
@@ -110,8 +107,9 @@ def floor_display(floor_id: str, db: Database = Depends(get_db)):
             "is_navigable": s.get("is_navigable", True),
             "capacity": s.get("capacity"),
         }
-        for s in neo4j_spaces
+        for s in missing
     ]
+    return [*pg_spaces, *extras]
 
 
 @router.get("/{floor_id}/connections")
@@ -120,7 +118,51 @@ def floor_connections(floor_id: str, db: Database = Depends(get_db)):
         CampusRepository(db).get_floor(floor_id)
     except FloorNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return ConnectionRepository(db).list_connections_for_floor(floor_id)
+
+    rows = ConnectionRepository(db).list_connections_for_floor(floor_id)
+
+    needs_positions = [
+        (r["from_id"], r["to_id"]) for r in rows
+        if r.get("door_id") is None
+        and (r.get("door_cx") is None or r.get("door_cy") is None)
+    ]
+    if needs_positions:
+        positions = PostGISService().get_direct_edge_door_positions(needs_positions)
+        if positions:
+            for r in rows:
+                if r.get("door_id") is not None:
+                    continue
+                pos = positions.get((r["from_id"], r["to_id"]))
+                if pos:
+                    r["door_cx"], r["door_cy"] = pos[0], pos[1]
+    return rows
+
+
+@router.patch("/{floor_id}/connections/door")
+def update_connection_door(
+    floor_id: str,
+    payload: dict,
+    db: Database = Depends(get_db),
+    principal: Principal = Depends(require_role("editor")),
+):
+    """Persist a door box position the editor dragged along the wall.
+    """
+    try:
+        CampusRepository(db).get_floor(floor_id)
+    except FloorNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        from_id = str(payload["from_space_id"])
+        to_id = str(payload["to_space_id"])
+        dcx = float(payload["door_cx"])
+        dcy = float(payload["door_cy"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Body must include from_space_id, to_space_id, door_cx, door_cy ({exc})",
+        )
+    ok = PostGISService().update_connection_door_position(from_id, to_id, dcx, dcy)
+    return {"updated": bool(ok)}
 
 
 @router.get("/{floor_id}/geometry")

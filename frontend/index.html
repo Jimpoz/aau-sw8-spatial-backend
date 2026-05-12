@@ -1403,6 +1403,22 @@ canvas.addEventListener('mousemove', e => {
             if (b && b.polygon && b.polygon.length >= 3) candidates.push(b);
           }
         }
+        // For a real door Space (no preview metadata), look up the
+        // connection that this door belongs to and grab both endpoints.
+        // Without this branch we'd only ever find one room via the
+        // nearest-polygon fallback, and the drag couldn't be pinned to
+        // the shared wall.
+        if (candidates.length === 0) {
+          for (const c of (state.connections || [])) {
+            if (c && c.door_id === s.id) {
+              const fromRoom = findSpaceById(c.from_id || c.from_space_id || c.from);
+              const toRoom = findSpaceById(c.to_id || c.to_space_id || c.to);
+              if (fromRoom && fromRoom.polygon && fromRoom.polygon.length >= 3) candidates.push(fromRoom);
+              if (toRoom && toRoom.polygon && toRoom.polygon.length >= 3) candidates.push(toRoom);
+              break;
+            }
+          }
+        }
         if (candidates.length === 0) {
           const nearest = pickNearestPolygonForPoint(rawWx, rawWy);
           if (nearest) candidates.push(nearest);
@@ -1410,10 +1426,25 @@ canvas.addEventListener('mousemove', e => {
 
         let bestProj = [rawWx, rawWy];
         let bestD = Infinity;
-        for (const cand of candidates) {
-          const proj = closestPointOnPolygonBoundary(cand.polygon, rawWx, rawWy);
-          const d = Math.hypot(rawWx - proj[0], rawWy - proj[1]);
-          if (d < bestD) { bestD = d; bestProj = proj; }
+        // If we have BOTH adjacent rooms, constrain the door to slide
+        // only along the wall they share — a door can't migrate to the
+        // far side of a hallway any more than it could in real life.
+        if (candidates.length >= 2) {
+          const segs = findSharedWallSegments(candidates[0].polygon, candidates[1].polygon);
+          for (const [a, b] of segs) {
+            const proj = closestPointOnSegment(a[0], a[1], b[0], b[1], rawWx, rawWy);
+            const d = Math.hypot(rawWx - proj[0], rawWy - proj[1]);
+            if (d < bestD) { bestD = d; bestProj = proj; }
+          }
+        }
+        // No shared wall (or only one adjacent room known) → per-polygon
+        // boundary projection, same as before.
+        if (bestD === Infinity) {
+          for (const cand of candidates) {
+            const proj = closestPointOnPolygonBoundary(cand.polygon, rawWx, rawWy);
+            const d = Math.hypot(rawWx - proj[0], rawWy - proj[1]);
+            if (d < bestD) { bestD = d; bestProj = proj; }
+          }
         }
         state.moveSpace.centroid_x = bestProj[0];
         state.moveSpace.centroid_y = bestProj[1];
@@ -1774,8 +1805,17 @@ async function loadFloorConnections(floorId) {
       const b = spaceMap[toId];
       if (!a || !b) continue;
       if (a.centroid_x == null || b.centroid_x == null) continue;
-      const dx = (a.centroid_x + b.centroid_x) / 2.0;
-      const dy = (a.centroid_y + b.centroid_y) / 2.0;
+      // Use the persisted door position from the server when present
+      // (PostGIS `space_connections.door_cx/cy`); fall back to the
+      // arrow midpoint only for never-positioned direct edges.
+      let dx, dy;
+      if (c.door_cx != null && c.door_cy != null) {
+        dx = c.door_cx;
+        dy = c.door_cy;
+      } else {
+        dx = (a.centroid_x + b.centroid_x) / 2.0;
+        dy = (a.centroid_y + b.centroid_y) / 2.0;
+      }
       const doorId = `synth_conn_${ci}`;
       synth.push({
         id: doorId,
@@ -1903,31 +1943,50 @@ $('import-file').addEventListener('change', function() {
 $('import-btn').addEventListener('click', async () => {
   const file = $('import-file').files[0];
   if (!file) return;
+  // Hoisted so the finally block can recover org selection even on timeout.
+  let importedOrgIdFromFile = '';
+  let parsedCampusId = '';
   try {
     const text = await file.text();
     const json = JSON.parse(text);
-    const campusId = json.campus?.id;
-    if (!campusId) { notify('Invalid map JSON: missing campus.id', 'error'); return; }
+    parsedCampusId = json.campus?.id || '';
+    importedOrgIdFromFile = json.organization?.id || json.campus?.organization_id || '';
+    if (!parsedCampusId) { notify('Invalid map JSON: missing campus.id', 'error'); return; }
 
     $('import-btn').disabled = true;
     $('import-btn').textContent = 'Importing...';
-    const result = await api(`/campuses/${campusId}/import`, {
+    const result = await api(`/campuses/${parsedCampusId}/import`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: text,
     });
-    notify(`Imported: ${result.spaces_imported} spaces, ${result.connections_imported} connections`);
+    const skipped = result.connections_skipped ?? 0;
+    const skipMsg = skipped > 0 ? `, ${skipped} skipped (orphaned refs)` : '';
+    notify(`Imported: ${result.spaces_imported} spaces, ${result.connections_imported} connections${skipMsg}`);
     await loadOrganizations();
-    const importedOrgId = result.organization_id || json.organization?.id || json.campus?.organization_id || '';
+    const importedOrgId = result.organization_id || importedOrgIdFromFile;
     if (importedOrgId) {
       $('organization-select').value = importedOrgId;
-      state.selectedOrganizationId = importedOrgId;
+      $('organization-select').dispatchEvent(new Event('change'));
     }
     await loadCampuses();
-    $('campus-select').value = campusId;
+    $('campus-select').value = parsedCampusId;
     $('campus-select').dispatchEvent(new Event('change'));
   } catch (e) {
     /* notify already called */
+    // Import may have partially succeeded before timing out — the org
+    // is created in the very first phase, so refresh the dropdown so the
+    // user can select it and clean up (Delete Organization etc.).
+    try {
+      await loadOrganizations();
+      if (importedOrgIdFromFile) {
+        const orgExists = (state.organizations || []).some(o => o.id === importedOrgIdFromFile);
+        if (orgExists) {
+          $('organization-select').value = importedOrgIdFromFile;
+          $('organization-select').dispatchEvent(new Event('change'));
+        }
+      }
+    } catch (_) { /* ignore */ }
   } finally {
     $('import-btn').disabled = false;
     $('import-btn').textContent = 'Import';
@@ -2641,6 +2700,31 @@ function minDistPointToPolygon(px, py, polygon) {
   return bestD;
 }
 
+// Return the edge segments of A and B whose midpoints sit within `eps`
+// of the other polygon's boundary — i.e. the wall(s) the two rooms
+// share. `eps` is generous (30cm in world meters) because in many
+// floor plans adjacent rooms are modelled with a small wall-thickness
+// gap rather than touching exactly.
+function findSharedWallSegments(polyA, polyB, eps = 0.30) {
+  const segs = [];
+  const collect = (src, other) => {
+    if (!src || src.length < 2 || !other || other.length < 2) return;
+    const n = src.length;
+    for (let i = 0; i < n; i++) {
+      const a = src[i];
+      const b = src[(i + 1) % n];
+      const mx = (a[0] + b[0]) / 2;
+      const my = (a[1] + b[1]) / 2;
+      if (minDistPointToPolygon(mx, my, other) <= eps) {
+        segs.push([a, b]);
+      }
+    }
+  };
+  collect(polyA, polyB);
+  collect(polyB, polyA);
+  return segs;
+}
+
 function pickNearestPolygonForPoint(px, py) {
   let best = null, bestD = Infinity;
   for (const s of state.spaces) {
@@ -3193,6 +3277,22 @@ async function finishMove() {
   const space = state.moveSpace;
   if (!space) return;
   state.snapLines = [];
+
+  // Bail out on a no-op click: the user pressed and released on the box
+  // without dragging it. Persisting at the same coordinate would still
+  // trigger a reloadCurrentFloor and rip the door out of the user's
+  // hands the moment they tried to drag it. The threshold is small
+  // (1cm in world coords) so any real drag still counts.
+  if (state.moveOrigCentroid) {
+    const [ox, oy] = state.moveOrigCentroid;
+    const dx = (space.centroid_x ?? ox) - ox;
+    const dy = (space.centroid_y ?? oy) - oy;
+    if (Math.hypot(dx, dy) < 0.01) {
+      exitMoveMode();
+      return;
+    }
+  }
+
   try {
     // DXF dry-run preview: visual-only, do not persist.
     if (space.metadata && space.metadata.preview) {
@@ -3201,20 +3301,55 @@ async function finishMove() {
       return;
     }
 
+    // Snapshot the dragged-to position before any PATCH/reload work —
+    // we need it to survive an error path and to optimistically pin the
+    // door box so the eventual reload can't visually snap it back.
+    const droppedX = space.centroid_x;
+    const droppedY = space.centroid_y;
+
     // Synthesized door midpoint for a legacy direct-edge connection.
     // Promote it to a real door Space via PATCH /connections/{from}/{to}.
     if (space.metadata && space.metadata.synthesized) {
       const fromId = space.metadata.preview_from;
       const toId = space.metadata.preview_to;
       if (!fromId || !toId) throw new Error('Synth door missing endpoint metadata');
-      await api(`/connections/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}`, {
+      const patchRes = await api(`/connections/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ door_cx: space.centroid_x, door_cy: space.centroid_y }),
+        body: JSON.stringify({ door_cx: droppedX, door_cy: droppedY }),
       });
-      notify('Door midpoint saved.');
-      // Reload so the synth node is replaced by the now-real door Space.
+      // Optimistic local update so the next render shows the door at
+      // the dropped position even if the upcoming reload's GET
+      // momentarily returns stale data.
+      const newDoorId = patchRes && (patchRes.door_node_id || patchRes.door_id);
+      for (const c of (state.connections || [])) {
+        const a = c.from_id || c.from_space_id;
+        const b = c.to_id || c.to_space_id;
+        if ((a === fromId && b === toId) || (a === toId && b === fromId)) {
+          c.door_cx = droppedX;
+          c.door_cy = droppedY;
+          if (newDoorId) c.door_id = newDoorId;
+        }
+      }
+      notify('Door position saved.');
       if (state.selectedFloorId) await reloadCurrentFloor();
+      // Reload may have rebuilt the synth at midpoint if the new door
+      // Space hasn't propagated yet — re-pin our just-dragged value.
+      for (const c of (state.connections || [])) {
+        const a = c.from_id || c.from_space_id;
+        const b = c.to_id || c.to_space_id;
+        if ((a === fromId && b === toId) || (a === toId && b === fromId)) {
+          if (c.door_cx == null) c.door_cx = droppedX;
+          if (c.door_cy == null) c.door_cy = droppedY;
+        }
+      }
+      for (const s of (state.spaces || [])) {
+        if (newDoorId && s.id === newDoorId) {
+          s.centroid_x = droppedX;
+          s.centroid_y = droppedY;
+        }
+      }
+      render();
       exitMoveMode();
       return;
     }
@@ -3232,16 +3367,38 @@ async function finishMove() {
         await api(`/connections/${encodeURIComponent(fromId)}/${encodeURIComponent(toId)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ door_cx: space.centroid_x, door_cy: space.centroid_y }),
+          // Pass the door's id explicitly so the backend doesn't need
+          // to infer it via cypher — that inference can miss the door
+          // after an import if the imported edge set is even slightly
+          // off, which is the "duplicate on first drag" symptom.
+          body: JSON.stringify({ door_id: space.id, door_cx: droppedX, door_cy: droppedY }),
         });
+        // Optimistic update so reload-of-stale-data can't visually undo
+        // the drag the user just performed.
+        conn.door_cx = droppedX;
+        conn.door_cy = droppedY;
+        space.centroid_x = droppedX;
+        space.centroid_y = droppedY;
         notify(`Moved "${space.display_name || 'door'}"`);
         if (state.selectedFloorId) await reloadCurrentFloor();
+        // Re-pin in case the reload returned a stale centroid.
+        const conn2 = (state.connections || []).find(c => c.door_id === space.id);
+        if (conn2 && (conn2.door_cx == null || conn2.door_cy == null)) {
+          conn2.door_cx = droppedX;
+          conn2.door_cy = droppedY;
+        }
+        const stillSpace = (state.spaces || []).find(s => s.id === space.id);
+        if (stillSpace) {
+          stillSpace.centroid_x = droppedX;
+          stillSpace.centroid_y = droppedY;
+        }
+        render();
         exitMoveMode();
         return;
       }
     }
 
-    const body = { centroid_x: space.centroid_x, centroid_y: space.centroid_y };
+    const body = { centroid_x: droppedX, centroid_y: droppedY };
     if (space.polygon) body.polygon = space.polygon;
     await api(`/spaces/${space.id}`, {
       method: 'PATCH',
@@ -3250,9 +3407,16 @@ async function finishMove() {
     });
     notify(`Moved "${space.display_name}"`);
   } catch (e) {
-    if (state.moveOrigPoly) space.polygon = state.moveOrigPoly;
-    space.centroid_x = state.moveOrigCentroid[0];
-    space.centroid_y = state.moveOrigCentroid[1];
+    // Don't silently revert door drags — that's what was making it look
+    // like the door "snapped back to midpoint" when the PATCH erred.
+    // api() already showed the error message via notify(). For polygon
+    // spaces (non-door), restoring the original shape is still the
+    // right call since a partial PATCH leaves you with a misshapen room.
+    if (state.moveOrigPoly && space.polygon) {
+      space.polygon = state.moveOrigPoly;
+      space.centroid_x = state.moveOrigCentroid[0];
+      space.centroid_y = state.moveOrigCentroid[1];
+    }
   }
   exitMoveMode();
 }

@@ -56,11 +56,4 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-ARG INSTALL_NODE=0
-RUN if [ "$INSTALL_NODE" = "1" ]; then \
-        apt-get update && apt-get install -y --no-install-recommends nodejs npm && \
-        cd /app && npm install --no-audit --no-fund dxf-json && \
-        rm -rf /var/lib/apt/lists/* ; \
-    fi
-
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

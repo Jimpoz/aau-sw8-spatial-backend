@@ -78,15 +78,90 @@ class OrganizationRepository:
         )
         return [r["c"] for r in result]
 
-    def delete_organization(self, organization_id: str) -> None:
-        self.db.execute_write(
+    def delete_organization(self, organization_id: str) -> dict:
+        """Delete an Organization and every descendant — Campuses, Buildings,
+        Floors, Spaces."""
+        exists = self.db.execute(
+            "MATCH (o:Organization {id: $id}) RETURN o.id AS id",
+            {"id": organization_id},
+        )
+        if not exists:
+            raise OrganizationNotFound(organization_id)
+
+        conn_types = [t.value for t in CONN_SPACE_TYPES]
+
+        campus_rows = self.db.execute(
+            "MATCH (:Organization {id: $id})-[:HAS_CAMPUS]->(c:Campus) RETURN c.id AS id",
+            {"id": organization_id},
+        )
+        campus_ids = [r["id"] for r in campus_rows]
+
+        building_rows = self.db.execute(
             """
-            MATCH (o:Organization {id: $id})
-            OPTIONAL MATCH (o)-[:HAS_CAMPUS]->(c:Campus)-[:HAS_BUILDING]->(b:Building)-[:HAS_FLOOR]->(f:Floor)-[:HAS_SPACE]->(s:Space)
-            DETACH DELETE s, f, b, c, o
+            MATCH (:Organization {id: $id})-[:HAS_CAMPUS]->(:Campus)-[:HAS_BUILDING]->(b:Building)
+            RETURN b.id AS id
             """,
             {"id": organization_id},
         )
+        building_ids = [r["id"] for r in building_rows]
+
+        floor_rows = self.db.execute(
+            """
+            MATCH (:Organization {id: $id})-[:HAS_CAMPUS]->(:Campus)-[:HAS_BUILDING]->(b:Building)-[:HAS_FLOOR]->(f:Floor)
+            RETURN b.id AS building_id, f.id AS id
+            """,
+            {"id": organization_id},
+        )
+        floor_ids = [r["id"] for r in floor_rows]
+        floor_pks = [f"{r['building_id']}_{r['id']}" for r in floor_rows]
+
+        space_rows = self.db.execute(
+            """
+            MATCH (:Organization {id: $id})-[:HAS_CAMPUS]->(:Campus)-[:HAS_BUILDING]->(:Building)-[:HAS_FLOOR]->(:Floor)-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            RETURN collect(DISTINCT s.id) AS roots, collect(DISTINCT sub.id) AS subs
+            """,
+            {"id": organization_id},
+        )
+        space_ids: set[str] = set()
+        if space_rows:
+            space_ids.update(sid for sid in space_rows[0]["roots"] if sid)
+            space_ids.update(sid for sid in space_rows[0]["subs"] if sid)
+
+        door_ids: set[str] = set()
+        if space_ids:
+            door_rows = self.db.execute(
+                """
+                MATCH (s:Space)-[:CONNECTS_TO]-(d:Space)
+                WHERE s.id IN $space_ids AND d.space_type IN $conn_types
+                RETURN DISTINCT d.id AS id
+                """,
+                {"space_ids": list(space_ids), "conn_types": conn_types},
+            )
+            door_ids.update(r["id"] for r in door_rows)
+
+        self.db.execute_write(
+            """
+            MATCH (o:Organization {id: $id})
+            OPTIONAL MATCH (o)-[:HAS_CAMPUS]->(c:Campus)
+            OPTIONAL MATCH (c)-[:HAS_BUILDING]->(b:Building)
+            OPTIONAL MATCH (b)-[:HAS_FLOOR]->(f:Floor)
+            OPTIONAL MATCH (f)-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            OPTIONAL MATCH (d:Space) WHERE d.id IN $door_ids
+            DETACH DELETE d, sub, s, f, b, c, o
+            """,
+            {"id": organization_id, "door_ids": list(door_ids)},
+        )
+
+        return {
+            "organization_id": organization_id,
+            "campus_ids": campus_ids,
+            "building_ids": building_ids,
+            "floor_ids": floor_ids,
+            "floor_pks": floor_pks,
+            "space_ids": sorted(space_ids | door_ids),
+        }
 
 
 class CampusRepository:
@@ -179,15 +254,78 @@ class CampusRepository:
             )
         return [r["c"] for r in result]
 
-    def delete_campus(self, campus_id: str) -> None:
-        self.db.execute_write(
+    def delete_campus(self, campus_id: str) -> dict:
+        """Delete a Campus and every descendant — Buildings, Floors, Spaces."""
+        exists = self.db.execute(
+            "MATCH (c:Campus {id: $id}) RETURN c.id AS id",
+            {"id": campus_id},
+        )
+        if not exists:
+            raise CampusNotFound(campus_id)
+
+        conn_types = [t.value for t in CONN_SPACE_TYPES]
+
+        building_rows = self.db.execute(
+            "MATCH (:Campus {id: $id})-[:HAS_BUILDING]->(b:Building) RETURN b.id AS id",
+            {"id": campus_id},
+        )
+        building_ids = [r["id"] for r in building_rows]
+
+        floor_rows = self.db.execute(
             """
-            MATCH (c:Campus {id: $id})
-            OPTIONAL MATCH (c)-[:HAS_BUILDING]->(b:Building)-[:HAS_FLOOR]->(f:Floor)-[:HAS_SPACE]->(s:Space)
-            DETACH DELETE s, f, b, c
+            MATCH (:Campus {id: $id})-[:HAS_BUILDING]->(b:Building)-[:HAS_FLOOR]->(f:Floor)
+            RETURN b.id AS building_id, f.id AS id
             """,
             {"id": campus_id},
         )
+        floor_ids = [r["id"] for r in floor_rows]
+        floor_pks = [f"{r['building_id']}_{r['id']}" for r in floor_rows]
+
+        space_rows = self.db.execute(
+            """
+            MATCH (:Campus {id: $id})-[:HAS_BUILDING]->(:Building)-[:HAS_FLOOR]->(:Floor)-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            RETURN collect(DISTINCT s.id) AS roots, collect(DISTINCT sub.id) AS subs
+            """,
+            {"id": campus_id},
+        )
+        space_ids: set[str] = set()
+        if space_rows:
+            space_ids.update(sid for sid in space_rows[0]["roots"] if sid)
+            space_ids.update(sid for sid in space_rows[0]["subs"] if sid)
+
+        door_ids: set[str] = set()
+        if space_ids:
+            door_rows = self.db.execute(
+                """
+                MATCH (s:Space)-[:CONNECTS_TO]-(d:Space)
+                WHERE s.id IN $space_ids AND d.space_type IN $conn_types
+                RETURN DISTINCT d.id AS id
+                """,
+                {"space_ids": list(space_ids), "conn_types": conn_types},
+            )
+            door_ids.update(r["id"] for r in door_rows)
+
+        self.db.execute_write(
+            """
+            MATCH (c:Campus {id: $id})
+            OPTIONAL MATCH (c)-[:HAS_BUILDING]->(b:Building)
+            OPTIONAL MATCH (b)-[:HAS_FLOOR]->(f:Floor)
+            OPTIONAL MATCH (f)-[:HAS_SPACE]->(s:Space)
+            OPTIONAL MATCH (s)-[:HAS_SUBSPACE*1..]->(sub:Space)
+            OPTIONAL MATCH (d:Space) WHERE d.id IN $door_ids
+            DETACH DELETE d, sub, s, f, b, c
+            """,
+            {"id": campus_id, "door_ids": list(door_ids)},
+        )
+
+        return {
+            "campus_id": campus_id,
+            "building_ids": building_ids,
+            "floor_ids": floor_ids,
+            "floor_pks": floor_pks,
+            "space_ids": sorted(space_ids | door_ids),
+        }
 
     # --- Building ---
 

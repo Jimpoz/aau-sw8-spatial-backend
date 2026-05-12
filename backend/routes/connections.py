@@ -152,6 +152,7 @@ class ConnectionPatch(BaseModel):
     door_cy: float | None = None
     is_accessible: bool | None = None
     door_type: str | None = None  # STANDARD / AUTOMATIC / LOCKED / EMERGENCY
+    door_id: str | None = None
 
 
 def _door_space_type_from_str(door_type: str | None) -> SpaceType:
@@ -193,17 +194,25 @@ def patch_connection(
     org_id = space_a.get("organization_id") or space_b.get("organization_id")
     require_org_match(principal, org_id)
 
-    # Look up an existing door Space between these endpoints.
     conn_types = [t.value for t in CONN_SPACE_TYPES]
-    door_rows = db.execute(
-        """
-        MATCH (a:Space {id: $from_id})-[:CONNECTS_TO]->(door:Space)-[:CONNECTS_TO]->(b:Space {id: $to_id})
-        WHERE door.space_type IN $conn_types
-        RETURN door.id AS id LIMIT 1
-        """,
-        {"from_id": from_space_id, "to_id": to_space_id, "conn_types": conn_types},
-    )
-    door_id = door_rows[0]["id"] if door_rows else None
+    door_id: str | None = None
+    if data.door_id:
+        verify = db.execute(
+            "MATCH (s:Space {id: $id}) WHERE s.space_type IN $conn_types RETURN s.id AS id",
+            {"id": data.door_id, "conn_types": conn_types},
+        )
+        if verify:
+            door_id = verify[0]["id"]
+    if door_id is None:
+        door_rows = db.execute(
+            """
+            MATCH (a:Space {id: $from_id})-[:CONNECTS_TO]-(door:Space)-[:CONNECTS_TO]-(b:Space {id: $to_id})
+            WHERE door.space_type IN $conn_types AND door.id <> $from_id AND door.id <> $to_id
+            RETURN door.id AS id LIMIT 1
+            """,
+            {"from_id": from_space_id, "to_id": to_space_id, "conn_types": conn_types},
+        )
+        door_id = door_rows[0]["id"] if door_rows else None
 
     with audit_action("patch_connection", principal, organization_id=org_id) as detail:
         detail["from_space_id"] = from_space_id

@@ -10,7 +10,9 @@ from models.map_import import MapImportSchema
 from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
 from services.audit_service import audit_action
-from services.dxf_import_service import DxfImportService, parse_layer_mapping
+from services.dxf_import_service import parse_layer_mapping
+from services.dxf_normalize import normalize_bytes
+from services.dxf_convert import convert as dxf_convert
 from services.import_service import ImportService
 from services.gds_service import GdsService
 from services.postgis_service import PostGISService
@@ -114,8 +116,13 @@ def delete_campus(
     require_org_match(principal, org_id)
     with audit_action("delete_campus", principal, organization_id=org_id) as detail:
         detail["campus_id"] = campus_id
-        CampusRepository(db).delete_campus(campus_id)
-        PostGISService().delete_campus(campus_id)
+        result = CampusRepository(db).delete_campus(campus_id)
+        PostGISService().delete_campus_cascade(
+            campus_id=result["campus_id"],
+            building_ids=result["building_ids"],
+            floor_pks=result["floor_pks"],
+            space_ids=result["space_ids"],
+        )
 
 
 @router.post("/{campus_id}/import")
@@ -189,25 +196,10 @@ async def import_dxf(
     principal: Principal = Depends(require_role("editor")),
 ):
     """Upload a DWG / DXF floor plan and convert + import it in one shot.
+    DWG conversion to DXF first via an external file converter."""
 
-    The flow is:
-        upload  →  DxfImportService.parse  →  MapImportSchema dict
-                →  (dry_run? return preview)
-                →  ImportService.import_map  →  Neo4j + PostGIS (atomic)
-                →  GdsService.refresh_projection
-
-    Same dual-write pipeline that JSON imports use; the only thing the DXF
-    leg adds is the parser. DWG uploads transcode to DXF first via
-    ODAFileConverter (returns 415 if the binary is not on PATH).
-
-    `layer_mapping` is an optional JSON object (sent as a form field
-    string) that overrides the default heuristic for layer→SpaceType
-    classification. Example: `{"WALLS_OFFICE_1": "ROOM_OFFICE"}`.
-
-    `dry_run=true` parses the file and returns the schema preview plus
-    parsing warnings WITHOUT writing to either database. Use it to
-    verify the layer-mapping result before committing the import."""
     require_org_match(principal, organization_id)
+    _ = origin_lat, origin_lng, enable_polygonize
 
     file_bytes = await file.read()
     if not file_bytes:
@@ -217,30 +209,28 @@ async def import_dxf(
         layer_overrides = parse_layer_mapping(layer_mapping)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-
-    try:
-        # Parse is CPU-bound (ezdxf, shapely). Run on a worker thread so
-        # the FastAPI event loop stays responsive — otherwise the reverse
-        # proxy times out and returns 502 on large drawings.
-        schema_dict = await asyncio.to_thread(
-            DxfImportService().parse,
-            file_bytes,
-            file.filename or "upload.dxf",
+    
+    def _run_pipeline() -> tuple[dict, dict]:
+        normalized = normalize_bytes(file_bytes, file.filename or "upload.dxf")
+        return dxf_convert(
+            normalized,
+            organization_id=organization_id,
+            organization_name=organization_name,
             campus_id=campus_id,
             campus_name=campus_name,
+            campus_description=building_name or None,
             building_id=building_id,
             building_name=building_name,
+            building_short_name=(building_name.split()[0] if building_name else None),
             floor_id=floor_id,
             floor_index=floor_index,
             floor_display_name=floor_display_name,
-            organization_id=organization_id,
-            organization_name=organization_name,
-            origin_lat=origin_lat,
-            origin_lng=origin_lng,
             origin_bearing=origin_bearing,
             layer_mapping=layer_overrides,
-            enable_polygonize=enable_polygonize,
         )
+
+    try:
+        schema_dict, summary = await asyncio.to_thread(_run_pipeline)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=415, detail=str(exc))
     except ValueError as exc:
@@ -248,8 +238,8 @@ async def import_dxf(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"DXF parse failed: {exc}")
 
-    warnings = schema_dict.get("_warnings", [])
-    classification = schema_dict.get("_classification_summary", {})
+    warnings = list(summary.get("warnings") or [])
+    classification = dict(summary.get("classification_summary") or {})
     spaces_in_floor = schema_dict["campus"]["buildings"][0]["floors"][0]["spaces"]
     rooms_detected = len(spaces_in_floor)
 
@@ -436,6 +426,23 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
         c.setdefault("requires_access_level", None)
         c.setdefault("transition_time_s", None)
         c.setdefault("weight_override", None)
+
+    exported_space_ids: set[str] = set()
+    def _collect_ids(spaces: list[dict]) -> None:
+        for s in spaces:
+            if s.get("id"):
+                exported_space_ids.add(s["id"])
+            if isinstance(s.get("subspaces"), list):
+                _collect_ids(s["subspaces"])
+    for b in buildings_out:
+        for f in b.get("floors", []):
+            _collect_ids(f.get("spaces", []))
+
+    connections_out = [
+        c for c in connections_out
+        if c.get("from_space_id") in exported_space_ids
+        and c.get("to_space_id") in exported_space_ids
+    ]
 
     organization = None
     org_id = campus.get("organization_id") if isinstance(campus, dict) else None

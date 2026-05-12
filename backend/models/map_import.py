@@ -91,6 +91,8 @@ class ConnectionNodeImport(BaseModel):
     weight_override: Optional[float] = None
     door_cx: Optional[float] = None
     door_cy: Optional[float] = None
+    door_cx: Optional[float] = None
+    door_cy: Optional[float] = None
 
     @validator('connection_type', pre=True)
     def validate_connection_type(cls, v):
