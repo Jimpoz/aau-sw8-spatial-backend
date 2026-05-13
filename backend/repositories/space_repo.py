@@ -102,17 +102,23 @@ class SpaceRepository:
         return _from_neo4j(result[0]["s"])
 
     def delete_space(self, space_id: str) -> list[str]:
-        """Delete the space together with every door/passage node that connects
-        to it. Returns the list of deleted door IDs so the PostGIS mirror can drop matching connection.
-        """
+        """Delete the space and cascade-clean its door/passage neighbours."""
         conn_types = [t.value for t in CONN_SPACE_TYPES]
 
-        exists = self.db.execute(
-            "MATCH (s:Space {id: $id}) RETURN s.id AS id",
+        existing = self.db.execute(
+            "MATCH (s:Space {id: $id}) RETURN s.space_type AS space_type",
             {"id": space_id},
         )
-        if not exists:
+        if not existing:
             raise SpaceNotFound(space_id)
+        target_is_connector = existing[0]["space_type"] in conn_types
+
+        if target_is_connector:
+            self.db.execute_write(
+                "MATCH (s:Space {id: $id}) DETACH DELETE s",
+                {"id": space_id},
+            )
+            return []
 
         door_rows = self.db.execute(
             """
