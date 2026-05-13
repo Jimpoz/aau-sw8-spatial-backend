@@ -571,48 +571,59 @@ class PostGISService:
     def _apply_delete_organization_cascade(
         self,
         organization_id: str,
-        campus_ids: list[str],
-        building_ids: list[str],
-        floor_pks: list[str],
-        space_ids: list[str],
+        campus_ids: list[str] | None = None,
+        building_ids: list[str] | None = None,
+        floor_pks: list[str] | None = None,
+        space_ids: list[str] | None = None,
     ) -> None:
         session = self._open_session()
-
-        if space_ids:
-            session.query(SpaceConnection).filter(
-                or_(
-                    SpaceConnection.from_space_id.in_(space_ids),
-                    SpaceConnection.to_space_id.in_(space_ids),
-                    SpaceConnection.door_space_id.in_(space_ids),
-                    SpaceConnection.connection_group_id.in_(space_ids),
+        try:
+            current_space_ids = [
+                row[0] for row in session.execute(
+                    text(
+                        "SELECT id FROM building_spaces "
+                        "WHERE organization_id = :org_id"
+                    ),
+                    {"org_id": organization_id},
                 )
-            ).delete(synchronize_session=False)
+            ]
+            if current_space_ids:
+                session.query(SpaceConnection).filter(
+                    or_(
+                        SpaceConnection.from_space_id.in_(current_space_ids),
+                        SpaceConnection.to_space_id.in_(current_space_ids),
+                        SpaceConnection.door_space_id.in_(current_space_ids),
+                        SpaceConnection.connection_group_id.in_(current_space_ids),
+                    )
+                ).delete(synchronize_session=False)
 
             session.query(BuildingSpace).filter(
-                BuildingSpace.id.in_(space_ids)
+                BuildingSpace.organization_id == organization_id
             ).delete(synchronize_session=False)
 
-        if floor_pks:
             session.query(Floor).filter(
-                Floor.id.in_(floor_pks)
+                Floor.organization_id == organization_id
             ).delete(synchronize_session=False)
 
-        if building_ids:
             session.query(Building).filter(
-                Building.id.in_(building_ids)
+                Building.organization_id == organization_id
             ).delete(synchronize_session=False)
 
-        if campus_ids:
             session.query(Campus).filter(
-                Campus.id.in_(campus_ids)
+                Campus.organization_id == organization_id
             ).delete(synchronize_session=False)
 
-        session.query(Organization).filter_by(id=organization_id).delete(
-            synchronize_session=False
-        )
+            session.query(ImportRecord).filter(
+                ImportRecord.organization_id == organization_id
+            ).delete(synchronize_session=False)
 
-        session.commit()
-        session.close()
+            session.query(Organization).filter_by(id=organization_id).delete(
+                synchronize_session=False
+            )
+
+            session.commit()
+        finally:
+            session.close()
 
     # --- campuses ---
 

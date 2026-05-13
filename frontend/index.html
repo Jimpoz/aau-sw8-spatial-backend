@@ -2188,6 +2188,7 @@ $('dxf-import-btn').addEventListener('click', async () => {
       $('organization-select').value = orgId;
       state.selectedOrganizationId = orgId;
     }
+    $('delete-org-btn').disabled = !state.selectedOrganizationId;
     await loadCampuses();
     $('campus-select').value = campusId;
     $('campus-select').dispatchEvent(new Event('change'));
@@ -2348,6 +2349,7 @@ $('modal-create').addEventListener('click', async () => {
     await loadOrganizations();
     $('organization-select').value = organizationId;
     state.selectedOrganizationId = organizationId;
+    $('delete-org-btn').disabled = !state.selectedOrganizationId;
     await loadCampuses();
     $('campus-select').value = campusId;
     $('campus-select').dispatchEvent(new Event('change'));
@@ -3727,6 +3729,7 @@ async function loadAfterAuth() {
     $('organization-select').value = state.organizations[0].id;
     state.selectedOrganizationId = state.organizations[0].id;
   }
+  $('delete-org-btn').disabled = !state.selectedOrganizationId;
   if (state.campuses.length === 1) {
     $('campus-select').value = state.campuses[0].id;
     $('campus-select').dispatchEvent(new Event('change'));

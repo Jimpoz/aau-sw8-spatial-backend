@@ -47,6 +47,10 @@ class PasswordResetRequest(BaseModel):
     new_password: str = Field(min_length=8)
 
 
+class AccountDeleteRequest(BaseModel):
+    password: str
+
+
 class UserDTO(BaseModel):
     id: str
     email: str
@@ -290,6 +294,26 @@ def password_reset(
             email=payload.email,
             code=payload.code,
             new_password=payload.new_password,
+            ip_address=ip,
+            user_agent=ua,
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+
+
+@router.delete("/me", status_code=204)
+def delete_me(
+    payload: AccountDeleteRequest,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    svc: AuthService = Depends(_get_service),
+):
+    user_id = _require_user_id(authorization)
+    ip, ua = _client_meta(request)
+    try:
+        svc.delete_account(
+            user_id=user_id,
+            password=payload.password,
             ip_address=ip,
             user_agent=ua,
         )

@@ -796,9 +796,37 @@ class AuthService:
         finally:
             session.close()
 
-    # Constant-time comparison helper — exposed so future flows (password
-    # reset, internal-token verification) reuse the same primitive instead of
-    # rolling their own and getting the timing wrong.
+    def delete_account(
+        self,
+        user_id: str,
+        password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        session = self._SessionLocal()
+        try:
+            user = session.query(AppUser).filter_by(id=user_id).first()
+            if not user or not user.is_active:
+                raise AuthError("User not found", status_code=404)
+            if not verify_password(password, user.password_hash):
+                self._audit(
+                    session, action="account_delete", success=False,
+                    subject_user_id=user.id, subject_email=user.email,
+                    ip_address=ip_address, user_agent=user_agent,
+                    detail={"reason": "bad_password"},
+                )
+                session.commit()
+                raise AuthError("Invalid credentials", status_code=401)
+            self._audit(
+                session, action="account_delete", success=True,
+                subject_user_id=user.id, subject_email=user.email,
+                ip_address=ip_address, user_agent=user_agent,
+            )
+            session.delete(user)
+            session.commit()
+        finally:
+            session.close()
+
     @staticmethod
     def constant_time_equals(a: str, b: str) -> bool:
         return hmac.compare_digest(a or "", b or "")
