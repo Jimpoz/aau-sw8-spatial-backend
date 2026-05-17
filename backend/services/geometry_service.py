@@ -36,11 +36,10 @@ def area_from_polygon(polygon: list[list[float]]) -> float:
 
 
 def find_shared_edge_midpoint(
-    poly_a: list[list[float]], poly_b: list[list[float]]
+    poly_a: list[list[float]], poly_b: list[list[float]], eps: float = 0.30
 ) -> Optional[tuple[float, float]]:
-    """Return the midpoint of the shared boundary between two polygons.
-
-    Falls back to the midpoint of the closest points if no shared edge exists.
+    """Return the midpoint of the *overlapping slice* of the two rooms'
+    walls — the middle of the shorter side they actually share.
     Returns None if Shapely is not available.
     """
     if not _SHAPELY:
@@ -49,34 +48,25 @@ def find_shared_edge_midpoint(
 
     a = ShapelyPolygon(poly_a)
     b = ShapelyPolygon(poly_b)
-    shared = a.boundary.intersection(b.boundary)
-    if not shared.is_empty:
-        c = shared.centroid
-        return (c.x, c.y)
-    # Fallback: midpoint between closest points on the two polygons
-    p1, p2 = nearest_points(a, b)
-    return ((p1.x + p2.x) / 2, (p1.y + p2.y) / 2)
+    shared = a.boundary.intersection(b.boundary.buffer(eps))
 
+    def _line_components(geom, out):
+        if geom.is_empty:
+            return
+        if hasattr(geom, "geoms"):
+            for g in geom.geoms:
+                _line_components(g, out)
+        elif geom.geom_type in ("LineString", "LinearRing"):
+            out.append(geom)
 
-def find_shared_edge_midpoint(
-    poly_a: list[list[float]], poly_b: list[list[float]]
-) -> Optional[tuple[float, float]]:
-    """Return the midpoint of the shared boundary between two polygons.
+    lines: list = []
+    _line_components(shared, lines)
+    if lines:
+        longest = max(lines, key=lambda g: g.length)
+        mid = longest.interpolate(0.5, normalized=True)
+        return (mid.x, mid.y)
 
-    Falls back to the midpoint of the closest points if no shared edge exists.
-    Returns None if Shapely is not available.
-    """
-    if not _SHAPELY:
-        return None
-    from shapely.ops import nearest_points
-
-    a = ShapelyPolygon(poly_a)
-    b = ShapelyPolygon(poly_b)
-    shared = a.boundary.intersection(b.boundary)
-    if not shared.is_empty:
-        c = shared.centroid
-        return (c.x, c.y)
-    # Fallback: midpoint between closest points on the two polygons
+    # No detectable overlap — fall back to midpoint of the closest points.
     p1, p2 = nearest_points(a, b)
     return ((p1.x + p2.x) / 2, (p1.y + p2.y) / 2)
 
@@ -91,7 +81,8 @@ def local_to_global_coordinates(
     local_y: float,
     origin_lat: float,
     origin_lng: float,
-    bearing: float = 0.0
+    bearing: float = 0.0,
+    scale: float = 1.0
 ) -> Tuple[float, float]:
     """
     Convert local coordinates (meters) to global lat/lng coordinates.
@@ -102,6 +93,7 @@ def local_to_global_coordinates(
         origin_lat: Building origin latitude in degrees
         origin_lng: Building origin longitude in degrees
         bearing: Building bearing/orientation in degrees (0 = North)
+        scale: Uniform scale factor applied to local coords before projection
 
     Returns:
         Tuple of (latitude, longitude) in degrees
@@ -112,7 +104,9 @@ def local_to_global_coordinates(
     # Convert bearing to radians
     bearing_rad = math.radians(bearing)
 
-    # Rotate coordinates by bearing
+    # Apply scale, then rotate coordinates by bearing
+    local_x = local_x * scale
+    local_y = local_y * scale
     rotated_x = local_x * math.cos(bearing_rad) - local_y * math.sin(bearing_rad)
     rotated_y = local_x * math.sin(bearing_rad) + local_y * math.cos(bearing_rad)
 
@@ -123,6 +117,30 @@ def local_to_global_coordinates(
     new_lat = origin_lat + lat_offset
     new_lng = origin_lng + lng_offset
 
+    return new_lat, new_lng
+
+
+def apply_edit_transform(
+    lat: float,
+    lng: float,
+    pivot_lat: float,
+    pivot_lng: float,
+    delta_lat: float,
+    delta_lng: float,
+    delta_bearing_deg: float,
+    scale_mult: float,
+) -> Tuple[float, float]:
+    m_per_deg_lat = 111_000.0
+    m_per_deg_lng = 111_000.0 * math.cos(math.radians(pivot_lat))
+    dx = (lng - pivot_lng) * m_per_deg_lng
+    dy = (lat - pivot_lat) * m_per_deg_lat
+    b = math.radians(delta_bearing_deg)
+    rx = dx * math.cos(b) - dy * math.sin(b)
+    ry = dx * math.sin(b) + dy * math.cos(b)
+    sx = rx * scale_mult
+    sy = ry * scale_mult
+    new_lng = pivot_lng + delta_lng + sx / m_per_deg_lng
+    new_lat = pivot_lat + delta_lat + sy / m_per_deg_lat
     return new_lat, new_lng
 
 
@@ -166,7 +184,8 @@ def polygon_local_to_global(
     polygon: list[list[float]],
     origin_lat: float,
     origin_lng: float,
-    bearing: float = 0.0
+    bearing: float = 0.0,
+    scale: float = 1.0
 ) -> list[list[float]]:
     """
     Convert a polygon from local coordinates to global lat/lng coordinates.
@@ -176,12 +195,13 @@ def polygon_local_to_global(
         origin_lat: Building origin latitude
         origin_lng: Building origin longitude
         bearing: Building bearing in degrees
+        scale: Uniform scale factor applied to local coords before projection
 
     Returns:
         List of [lat, lng] coordinates
     """
     return [
-        list(local_to_global_coordinates(x, y, origin_lat, origin_lng, bearing))
+        list(local_to_global_coordinates(x, y, origin_lat, origin_lng, bearing, scale))
         for x, y in polygon
     ]
 

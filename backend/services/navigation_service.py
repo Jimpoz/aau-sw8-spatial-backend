@@ -40,8 +40,16 @@ class NavigationService:
         from_space_id: str,
         to_space_id: str,
         accessible_only: bool = False,
+        avoid_stairs: bool = False,
+        elevators_only: bool = False,
     ) -> Route:
-        raw = self.repo.find_path(from_space_id, to_space_id, accessible_only)
+        raw = self.repo.find_path(
+            from_space_id,
+            to_space_id,
+            accessible_only=accessible_only,
+            avoid_stairs=avoid_stairs,
+            elevators_only=elevators_only,
+        )
 
         path_nodes: list[dict] = raw["path_nodes"]
         total_cost: float = raw["total_cost"] or 0.0

@@ -118,6 +118,7 @@ def _build_dispatch() -> dict[str, Callable[[Any, dict[str, Any]], Any]]:
         "delete_building": call("_apply_delete_building"),
         "delete_building_cascade": call("_apply_delete_building_cascade"),
         "sync_space": call("_apply_sync_space"),
+        "sync_space_geometry": call("_apply_sync_space_geometry"),
         "delete_space": call("_apply_delete_space"),
         "sync_floor": call("_apply_sync_floor"),
         "delete_floor": call("_apply_delete_floor"),

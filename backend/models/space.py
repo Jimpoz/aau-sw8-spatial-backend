@@ -53,6 +53,7 @@ class SpaceUpdate(BaseModel):
     metadata: Optional[dict[str, Any]] = None
     embedding: Optional[list[float]] = None
     traversal_cost: Optional[float] = None
+    render_order: Optional[int] = None
 
 
 class Space(BaseModel):
@@ -80,3 +81,4 @@ class Space(BaseModel):
     tags: list[str] = []
     metadata: Optional[dict] = None
     traversal_cost: Optional[float] = None
+    render_order: Optional[int] = None

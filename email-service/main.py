@@ -54,7 +54,7 @@ if _SMTP_USE_SSL_ENV is None:
     SMTP_USE_SSL = SMTP_PORT == 465
 else:
     SMTP_USE_SSL = _SMTP_USE_SSL_ENV.lower() in ("1", "true", "yes")
-SMTP_FROM_ADDRESS = _env("SMTP_FROM_ADDRESS") or "no-reply@ariadne.local"
+SMTP_FROM_ADDRESS = _env("SMTP_FROM_ADDRESS") or "noreply@ariadne.com"
 SMTP_FROM_NAME = _env("SMTP_FROM_NAME") or "Ariadne"
 MAILBOX_DIR = _env("MAILBOX_DIR")
 DRY_RUN = SMTP_HOST is None
@@ -126,8 +126,8 @@ def send_email(
         # interleaved with other services' logs.
         border = "=" * 72
         logger.info(
-            "\n%s\n[DUMMY EMAIL] to=%s\nSubject: %s\n%s\n%s\n%s",
-            border, payload.to, payload.subject, "-" * 72, payload.text, border,
+            "\n%s\n[DUMMY EMAIL]\nFrom: %s\nTo: %s\nSubject: %s\n%s\n%s\n%s",
+            border, msg["From"], payload.to, payload.subject, "-" * 72, payload.text, border,
         )
         if MAILBOX_DIR:
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")

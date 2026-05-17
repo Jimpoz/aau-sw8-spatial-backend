@@ -35,6 +35,13 @@ def _from_neo4j(node: dict) -> dict:
     return d
 
 
+def _search_result(node: dict) -> dict:
+    d = _from_neo4j(node)
+    if d.get("centroid_lon") is None and d.get("centroid_lng") is not None:
+        d["centroid_lon"] = d["centroid_lng"]
+    return d
+
+
 class SpaceRepository:
     def __init__(self, db: Database):
         self.db = db
@@ -277,50 +284,61 @@ class SpaceRepository:
 
         return spaces
 
+    _SEARCH_MATCH = """
+        s.is_navigable = true
+        AND NOT s.space_type STARTS WITH 'DOOR_'
+        AND s.space_type <> 'PASSAGE'
+        AND (
+            toLower(coalesce(s.display_name, '')) CONTAINS toLower($query)
+            OR toLower(coalesce(s.short_name, '')) CONTAINS toLower($query)
+            OR toLower(coalesce(s.tags_text, '')) CONTAINS toLower($query)
+        )
+    """
+    
+    _SEARCH_ORDER = """
+        WITH s, toLower(coalesce(s.display_name, '')) AS _name
+        ORDER BY
+            CASE WHEN _name STARTS WITH toLower($query) THEN 0 ELSE 1 END,
+            size(_name),
+            _name
+    """
+
     def search(self, campus_id: str, query: str) -> list[dict]:
         result = self.db.execute(
-            """
-            CALL db.index.fulltext.queryNodes('space_search_idx', $query)
-            YIELD node, score
-            WHERE node.campus_id = $campus_id AND node.is_navigable = true
-                AND NOT node.space_type STARTS WITH 'DOOR_'
-                AND node.space_type <> 'PASSAGE'
-                AND NOT node.space_type STARTS WITH 'DOOR_'
-                AND node.space_type <> 'PASSAGE'
-            RETURN node AS s, score
-            ORDER BY score DESC
+            f"""
+            MATCH (s:Space)
+            WHERE s.campus_id = $campus_id AND {self._SEARCH_MATCH}
+            {self._SEARCH_ORDER}
+            RETURN s
             LIMIT 20
             """,
             {"campus_id": campus_id, "query": query},
         )
-        return [_from_neo4j(r["s"]) for r in result]
+        return [_search_result(r["s"]) for r in result]
 
     def search_all(self, query: str, limit: int = 50) -> list[dict]:
         result = self.db.execute(
-            """
-            CALL db.index.fulltext.queryNodes('space_search_idx', $query)
-            YIELD node, score
-            WHERE node.is_navigable = true
-                AND NOT node.space_type STARTS WITH 'DOOR_'
-                AND node.space_type <> 'PASSAGE'
-            RETURN node AS s, score
-            ORDER BY score DESC
+            f"""
+            MATCH (s:Space)
+            WHERE {self._SEARCH_MATCH}
+            {self._SEARCH_ORDER}
+            RETURN s
             LIMIT $limit
             """,
             {"query": query, "limit": limit},
         )
-        return [_from_neo4j(r["s"]) for r in result]
+        return [_search_result(r["s"]) for r in result]
 
     def nearest_space(self, lat: float, lon: float, limit: int = 1) -> list[dict]:
         result = self.db.execute(
             """
             MATCH (s:Space)
-            WHERE s.centroid_lat IS NOT NULL AND s.centroid_lon IS NOT NULL AND s.is_navigable = true
-            WITH s, point({latitude: s.centroid_lat, longitude: s.centroid_lon}) AS p
-            RETURN s, distance(p, point({latitude: $lat, longitude: $lon})) AS dist
+            WHERE s.centroid_lat IS NOT NULL AND s.centroid_lng IS NOT NULL AND s.is_navigable = true
+            WITH s, point({latitude: s.centroid_lat, longitude: s.centroid_lng}) AS p
+            RETURN s, point.distance(p, point({latitude: $lat, longitude: $lon})) AS dist
             ORDER BY dist ASC
             LIMIT $limit
             """,
             {"lat": lat, "lon": lon, "limit": limit},
         )
-        return [_from_neo4j(r["s"]) for r in result]
+        return [_search_result(r["s"]) for r in result]

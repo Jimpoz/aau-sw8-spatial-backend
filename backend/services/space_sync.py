@@ -16,32 +16,65 @@ def _space_type_str(value) -> str | None:
     return value.value if hasattr(value, "value") else str(value)
 
 
+def _resolve_georef(
+    space: dict,
+    campus_repo: CampusRepository,
+) -> tuple[float | None, float | None, float, float]:
+    """Pick the georef to project this space's local coords into world coords."""
+    floor_id = space.get("floor_id")
+    if floor_id:
+        try:
+            floor = campus_repo.get_floor(floor_id)
+        except Exception:
+            floor = None
+        if floor and floor.get("origin_lat") is not None and floor.get("origin_lng") is not None:
+            return (
+                floor["origin_lat"],
+                floor["origin_lng"],
+                floor.get("origin_bearing") or 0.0,
+                floor.get("scale_factor") or 1.0,
+            )
+
+    building_id = space.get("building_id")
+    if building_id:
+        try:
+            building = campus_repo.get_building(building_id)
+        except Exception:
+            building = None
+        if building and building.get("origin_lat") is not None and building.get("origin_lng") is not None:
+            return (
+                building["origin_lat"],
+                building["origin_lng"],
+                building.get("origin_bearing") or 0.0,
+                building.get("scale_factor") or 1.0,
+            )
+
+    return None, None, 0.0, 1.0
+
+
 def build_space_sync_payload(
     space: dict,
     campus_repo: CampusRepository,
 ) -> dict:
     """Turn a Space dict (as stored in Neo4j) into the payload that
     PostGISService.sync_space expects, resolving global lat/lng/polygon
-    from the parent building's origin if available."""
+    from the per-floor override (if any) and otherwise from the parent
+    building's origin."""
     building_id = space.get("building_id")
     cx = space.get("centroid_x")
     cy = space.get("centroid_y")
     polygon = space.get("polygon")
 
     global_lat, global_lng, global_polygon = None, None, None
-    if building_id and cx is not None and cy is not None:
-        try:
-            building = campus_repo.get_building(building_id)
-        except Exception:
-            building = None
-        if building and building.get("origin_lat") is not None and building.get("origin_lng") is not None:
-            bearing = building.get("origin_bearing") or 0.0
+    if cx is not None and cy is not None:
+        origin_lat, origin_lng, bearing, scale = _resolve_georef(space, campus_repo)
+        if origin_lat is not None and origin_lng is not None:
             global_lat, global_lng = local_to_global_coordinates(
-                cx, cy, building["origin_lat"], building["origin_lng"], bearing,
+                cx, cy, origin_lat, origin_lng, bearing, scale,
             )
             if polygon:
                 global_polygon = polygon_local_to_global(
-                    polygon, building["origin_lat"], building["origin_lng"], bearing,
+                    polygon, origin_lat, origin_lng, bearing, scale,
                 )
 
     return {

@@ -22,6 +22,7 @@ from services.dxf_import_service import (
     _arc_is_door_candidate,
     _classify_space,
     _drop_outer_envelopes,
+    _drop_slivers,
     _filter_by_labels,
     _merge_id_type_pairs,
     _polygon_area_m2,
@@ -503,6 +504,17 @@ def convert(
         r for r in rooms
         if _MIN_ROOM_AREA_M2 <= _polygon_area_m2(r["polygon"]) <= _MAX_ROOM_AREA_M2
     ]
+
+    # Kill wall slivers before label attachment — otherwise a long thin
+    # wall slice can be the smallest containing polygon for a nearby
+    # room label and win the attachment competition, dropping the real
+    # room as unlabeled.
+    rooms, slivers_dropped = _drop_slivers(rooms)
+    if slivers_dropped:
+        warnings.append(
+            f"Dropped {slivers_dropped} sliver polygons "
+            f"(min-bbox short side < threshold) — these are wall slices, not rooms."
+        )
 
     texts = _texts(entities)
     _scale_texts(texts, scale)

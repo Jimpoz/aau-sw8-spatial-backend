@@ -107,7 +107,7 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
       - SMTP_USE_SSL=${SMTP_USE_SSL:-}
-      - SMTP_FROM_ADDRESS=${SMTP_FROM_ADDRESS:-no-reply@ariadne.local}
+      - SMTP_FROM_ADDRESS=${SMTP_FROM_ADDRESS:-noreply@ariadne.com}
       - SMTP_FROM_NAME=${SMTP_FROM_NAME:-Ariadne}
       - MAILBOX_DIR=${MAILBOX_DIR:-}
     volumes:

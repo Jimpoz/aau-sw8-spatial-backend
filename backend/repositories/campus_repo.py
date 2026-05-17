@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 from db import Database
@@ -10,10 +11,17 @@ from core.exceptions import (
 from models.campus import (
     CampusCreate,
     BuildingCreate,
+    BuildingUpdate,
     FloorCreate,
+    FloorUpdate,
     OrganizationCreate,
 )
 from models.enums import CONN_SPACE_TYPES
+from services.geometry_service import (
+    local_to_global_coordinates,
+    polygon_local_to_global,
+    apply_edit_transform,
+)
 
 
 def _now() -> str:
@@ -350,6 +358,7 @@ class CampusRepository:
                 b.origin_lat = $origin_lat,
                 b.origin_lng = $origin_lng,
                 b.origin_bearing = $origin_bearing,
+                b.scale_factor = $scale_factor,
                 b.floor_count = $floor_count,
                 b.campus_id = $campus_id,
                 b.organization_id = $organization_id,
@@ -361,6 +370,222 @@ class CampusRepository:
             {**data.model_dump(), "organization_id": organization_id, "now": now},
         )
         return result[0]["b"]
+
+    def _recompute_space(
+        self, s: dict, origin_lat: float, origin_lng: float,
+        bearing: float, scale: float,
+    ) -> dict:
+        """Re-project one space's global geometry from its local polygon +
+        the given origin, write it back to Neo4j, and return the values so
+        the caller can mirror them into PostGIS."""
+        polygon = s.get("polygon")
+        if isinstance(polygon, str):
+            try:
+                polygon = json.loads(polygon)
+            except (json.JSONDecodeError, TypeError):
+                polygon = None
+        cx, cy = s.get("centroid_x"), s.get("centroid_y")
+
+        centroid_lat = centroid_lng = None
+        if cx is not None and cy is not None:
+            centroid_lat, centroid_lng = local_to_global_coordinates(
+                cx, cy, origin_lat, origin_lng, bearing, scale
+            )
+
+        polygon_global = None
+        if polygon:
+            polygon_global = polygon_local_to_global(
+                polygon, origin_lat, origin_lng, bearing, scale
+            )
+
+        self.db.execute_write(
+            """
+            MATCH (s:Space {id: $id})
+            SET s.centroid_lat = $clat,
+                s.centroid_lng = $clng,
+                s.polygon_global = $pg
+            """,
+            {
+                "id": s["id"],
+                "clat": centroid_lat,
+                "clng": centroid_lng,
+                "pg": json.dumps(polygon_global) if polygon_global else None,
+            },
+        )
+        return {
+            "id": s["id"],
+            "centroid_lat": centroid_lat,
+            "centroid_lng": centroid_lng,
+            "polygon_global": polygon_global,
+        }
+
+    def update_building(self, building_id: str, data: BuildingUpdate) -> dict:
+        """Reposition / rotate / resize a building rigidly. The same move is
+        carried through to every per-floor origin override, so a floor that
+        was nudged individually still moves *with* the building. Then every
+        space is re-projected from its floor's effective origin."""
+        existing = self.db.execute(
+            "MATCH (b:Building {id: $id}) RETURN b",
+            {"id": building_id},
+        )
+        if not existing:
+            raise BuildingNotFound(building_id)
+        b = dict(existing[0]["b"])
+
+        old_lat = b.get("origin_lat")
+        old_lng = b.get("origin_lng")
+        old_bearing = b.get("origin_bearing") or 0.0
+        old_scale = b.get("scale_factor") or 1.0
+
+        new_lat = data.origin_lat if data.origin_lat is not None else old_lat
+        new_lng = data.origin_lng if data.origin_lng is not None else old_lng
+        new_bearing = (
+            data.origin_bearing if data.origin_bearing is not None else old_bearing
+        )
+        new_scale = (
+            data.scale_factor if data.scale_factor is not None else old_scale
+        )
+
+        now = _now()
+        updated = self.db.execute_write(
+            """
+            MATCH (b:Building {id: $id})
+            SET b.origin_lat = $lat,
+                b.origin_lng = $lng,
+                b.origin_bearing = $bearing,
+                b.scale_factor = $scale,
+                b.updated_at = $now
+            RETURN b
+            """,
+            {
+                "id": building_id, "lat": new_lat, "lng": new_lng,
+                "bearing": new_bearing, "scale": new_scale, "now": now,
+            },
+        )
+
+        updated_spaces: list[dict] = []
+        if new_lat is not None and new_lng is not None:
+            # The rigid delta of this building move (pivot = old origin).
+            if old_lat is not None and old_lng is not None:
+                d_lat = new_lat - old_lat
+                d_lng = new_lng - old_lng
+                d_bearing = new_bearing - old_bearing
+                scale_mult = (new_scale / old_scale) if old_scale else 1.0
+            else:
+                d_lat = d_lng = d_bearing = 0.0
+                scale_mult = 1.0
+
+            # Carry the move through to each per-floor origin override.
+            floor_origin: dict[str, tuple[float, float, float, float]] = {}
+            floor_rows = self.db.execute(
+                "MATCH (:Building {id: $id})-[:HAS_FLOOR]->(f:Floor) RETURN f",
+                {"id": building_id},
+            )
+            for fr in floor_rows:
+                f = dict(fr["f"])
+                if f.get("origin_lat") is None or f.get("origin_lng") is None:
+                    continue
+                f_lat, f_lng = apply_edit_transform(
+                    f["origin_lat"], f["origin_lng"],
+                    old_lat, old_lng, d_lat, d_lng, d_bearing, scale_mult,
+                )
+                f_bearing = (f.get("origin_bearing") or 0.0) + d_bearing
+                f_scale = (f.get("scale_factor") or 1.0) * scale_mult
+                self.db.execute_write(
+                    """
+                    MATCH (f:Floor {id: $id})
+                    SET f.origin_lat = $lat, f.origin_lng = $lng,
+                        f.origin_bearing = $bearing, f.scale_factor = $scale,
+                        f.updated_at = $now
+                    """,
+                    {
+                        "id": f["id"], "lat": f_lat, "lng": f_lng,
+                        "bearing": f_bearing, "scale": f_scale, "now": now,
+                    },
+                )
+                floor_origin[f["id"]] = (f_lat, f_lng, f_bearing, f_scale)
+
+            # Re-project every space from its floor's effective origin.
+            space_rows = self.db.execute(
+                "MATCH (s:Space {building_id: $id}) RETURN s",
+                {"id": building_id},
+            )
+            for row in space_rows:
+                s = dict(row["s"])
+                origin = floor_origin.get(
+                    s.get("floor_id"),
+                    (new_lat, new_lng, new_bearing, new_scale),
+                )
+                updated_spaces.append(self._recompute_space(s, *origin))
+
+        return {"building": updated[0]["b"], "updated_spaces": updated_spaces}
+
+    def update_floor(self, floor_id: str, data: FloorUpdate) -> dict:
+        """Reposition / rotate / resize a single floor. Stores a per-floor
+        origin override and re-projects only that floor's spaces."""
+        existing = self.db.execute(
+            """
+            MATCH (b:Building)-[:HAS_FLOOR]->(f:Floor {id: $id})
+            RETURN f, b
+            """,
+            {"id": floor_id},
+        )
+        if not existing:
+            raise FloorNotFound(floor_id)
+        f = dict(existing[0]["f"])
+        b = dict(existing[0]["b"])
+
+        # Resolve each field: explicit update > floor's own override > building.
+        def _resolve(field: str, building_default):
+            if getattr(data, field) is not None:
+                return getattr(data, field)
+            if f.get(field) is not None:
+                return f.get(field)
+            return building_default
+
+        new_lat = _resolve("origin_lat", b.get("origin_lat"))
+        new_lng = _resolve("origin_lng", b.get("origin_lng"))
+        new_bearing = _resolve("origin_bearing", b.get("origin_bearing") or 0.0)
+        new_scale = _resolve("scale_factor", b.get("scale_factor") or 1.0)
+
+        now = _now()
+        updated = self.db.execute_write(
+            """
+            MATCH (f:Floor {id: $id})
+            SET f.origin_lat = $lat,
+                f.origin_lng = $lng,
+                f.origin_bearing = $bearing,
+                f.scale_factor = $scale,
+                f.updated_at = $now
+            RETURN f
+            """,
+            {
+                "id": floor_id, "lat": new_lat, "lng": new_lng,
+                "bearing": new_bearing, "scale": new_scale, "now": now,
+            },
+        )
+
+        updated_spaces: list[dict] = []
+        if new_lat is not None and new_lng is not None:
+            # Space nodes carry no floor_id property — they hang off the floor
+            # via :HAS_SPACE (and nested :HAS_SUBSPACE), so walk the graph.
+            space_rows = self.db.execute(
+                """
+                MATCH (:Floor {id: $id})-[:HAS_SPACE]->(root:Space)
+                OPTIONAL MATCH (root)-[:HAS_SUBSPACE*1..]->(sub:Space)
+                WITH collect(DISTINCT root) + collect(DISTINCT sub) AS spaces
+                UNWIND spaces AS s
+                WITH DISTINCT s WHERE s IS NOT NULL
+                RETURN s
+                """,
+                {"id": floor_id},
+            )
+            for row in space_rows:
+                updated_spaces.append(self._recompute_space(
+                    dict(row["s"]), new_lat, new_lng, new_bearing, new_scale
+                ))
+
+        return {"floor": updated[0]["f"], "updated_spaces": updated_spaces}
 
     def get_building(self, building_id: str) -> dict:
         result = self.db.execute(
@@ -383,6 +608,26 @@ class CampusRepository:
 
     def list_visible_buildings(self, org_ids: list[str] | None) -> list[dict]:
         ids = list(org_ids or [])
+
+        # Backfill: if a Building has no origin_lat/lng but any of its
+        # Floors does, copy the lowest-floor-index one up to the
+        # Building. The mapmaker writes per-floor georef overrides
+        # without always stamping the parent building, which leaves
+        # the building unfilterable by world coords. This makes
+        # /buildings/visible self-healing.
+        self.db.execute_write(
+            """
+            MATCH (b:Building)
+            WHERE b.origin_lat IS NULL OR b.origin_lng IS NULL
+            MATCH (b)-[:HAS_FLOOR]->(f:Floor)
+            WHERE f.origin_lat IS NOT NULL AND f.origin_lng IS NOT NULL
+            WITH b, f ORDER BY coalesce(f.floor_index, 0) ASC
+            WITH b, head(collect(f)) AS first_floor
+            SET b.origin_lat = coalesce(b.origin_lat, first_floor.origin_lat),
+                b.origin_lng = coalesce(b.origin_lng, first_floor.origin_lng)
+            """,
+        )
+
         result = self.db.execute(
             """
             MATCH (c:Campus)-[:HAS_BUILDING]->(b:Building)

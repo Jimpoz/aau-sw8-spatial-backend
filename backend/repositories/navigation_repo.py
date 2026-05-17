@@ -34,6 +34,10 @@ MATCH path = shortestPath(
 )
 WHERE ALL(n IN nodes(path) WHERE n.is_navigable = true OR n.id IN [$from_id, $to_id])
     AND ($accessible_only = false OR ALL(n IN nodes(path) WHERE n.is_accessible = true))
+    AND ALL(
+        n IN nodes(path)
+        WHERE n.id IN [$from_id, $to_id] OR NOT n.space_type IN $excluded_types
+    )
 RETURN
     [n IN nodes(path) | {
         id: n.id,
@@ -53,6 +57,16 @@ LIMIT 1
 """
 
 
+def _excluded_types(avoid_stairs: bool, elevators_only: bool) -> list[str]:
+    """Vertical-transport space types to keep out of the path."""
+    excluded: set[str] = set()
+    if avoid_stairs:
+        excluded.update({"STAIRCASE", "ESCALATOR"})
+    if elevators_only:
+        excluded.update({"STAIRCASE", "ESCALATOR", "RAMP"})
+    return sorted(excluded)
+
+
 class NavigationRepository:
     def __init__(self, db: Database):
         self.db = db
@@ -62,6 +76,8 @@ class NavigationRepository:
         from_id: str,
         to_id: str,
         accessible_only: bool = False,
+        avoid_stairs: bool = False,
+        elevators_only: bool = False,
         gds_projection: str = "navigation-graph",
     ) -> dict:
         """Return {path_nodes, total_cost} or raise NavigationError."""
@@ -74,8 +90,9 @@ class NavigationRepository:
             if not check:
                 raise SpaceNotFound(space_id)
 
-        # Try GDS Dijkstra first (weighted, ignores accessible_only filter at graph level)
-        if not accessible_only:
+        excluded = _excluded_types(avoid_stairs, elevators_only)
+
+        if not accessible_only and not excluded:
             try:
                 result = self.db.execute(
                     _GDS_QUERY,
@@ -88,16 +105,28 @@ class NavigationRepository:
                         "total_cost": row["totalCost"],
                     }
             except Exception:
-                pass  # GDS not available or projection missing — fall through
+                pass
 
-        # Fallback: native shortestPath (hop-count shortest, with accessibility filter)
         result = self.db.execute(
             _NATIVE_QUERY,
-            {"from_id": from_id, "to_id": to_id, "accessible_only": accessible_only},
+            {
+                "from_id": from_id,
+                "to_id": to_id,
+                "accessible_only": accessible_only,
+                "excluded_types": excluded,
+            },
         )
         if not result or not result[0]["path_nodes"]:
+            filters: list[str] = []
+            if accessible_only:
+                filters.append("accessible")
+            if elevators_only:
+                filters.append("elevators-only")
+            elif avoid_stairs:
+                filters.append("no-stairs")
+            label = ", ".join(filters)
             raise NavigationError(
-                f"No {'accessible ' if accessible_only else ''}path found "
+                f"No{' ' + label if label else ''} path found "
                 f"from '{from_id}' to '{to_id}'"
             )
         row = result[0]

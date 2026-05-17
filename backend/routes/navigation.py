@@ -14,10 +14,18 @@ def navigate(
     from_space_id: str = Query(..., alias="from"),
     to_space_id: str = Query(..., alias="to"),
     accessible_only: bool = Query(False),
+    avoid_stairs: bool = Query(False),
+    elevators_only: bool = Query(False),
     db: Database = Depends(get_db),
 ):
     try:
-        return NavigationService(db).get_route(from_space_id, to_space_id, accessible_only)
+        return NavigationService(db).get_route(
+            from_space_id,
+            to_space_id,
+            accessible_only=accessible_only,
+            avoid_stairs=avoid_stairs,
+            elevators_only=elevators_only,
+        )
     except SpaceNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except NavigationError as e:

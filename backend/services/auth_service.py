@@ -922,7 +922,7 @@ class AuthService:
             session.commit()
 
             text_body = (
-                "Someone (hopefully you) requested a password reset for your Ariadne account.\n\n"
+                "Someone requested a password reset for your Ariadne account.\n\n"
                 f"Your one-time code (valid for {ttl // 60} minutes):\n\n"
                 f"    {otp}\n\n"
                 "Enter it in the app along with your new password.\n\n"

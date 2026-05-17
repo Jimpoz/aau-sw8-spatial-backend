@@ -71,7 +71,16 @@ class BuildingCreate(BaseModel):
     origin_lat: Optional[float] = None
     origin_lng: Optional[float] = None
     origin_bearing: float = 0.0
+    scale_factor: float = 1.0
     floor_count: Optional[int] = None
+
+
+class BuildingUpdate(BaseModel):
+    """Georeferencing edit: reposition / rotate / resize a building."""
+    origin_lat: Optional[float] = None
+    origin_lng: Optional[float] = None
+    origin_bearing: Optional[float] = None
+    scale_factor: Optional[float] = None
 
 
 class Building(BaseModel):
@@ -84,6 +93,7 @@ class Building(BaseModel):
     origin_lat: Optional[float] = None
     origin_lng: Optional[float] = None
     origin_bearing: Optional[float] = None
+    scale_factor: float = 1.0
     floor_count: Optional[int] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -101,6 +111,14 @@ class FloorCreate(BaseModel):
     floor_plan_origin_y: Optional[float] = None
 
 
+class FloorUpdate(BaseModel):
+    """Per-floor georeferencing edit."""
+    origin_lat: Optional[float] = None
+    origin_lng: Optional[float] = None
+    origin_bearing: Optional[float] = None
+    scale_factor: Optional[float] = None
+
+
 class Floor(BaseModel):
     id: str
     building_id: str
@@ -111,3 +129,7 @@ class Floor(BaseModel):
     floor_plan_scale: Optional[float] = None
     floor_plan_origin_x: Optional[float] = None
     floor_plan_origin_y: Optional[float] = None
+    origin_lat: Optional[float] = None
+    origin_lng: Optional[float] = None
+    origin_bearing: Optional[float] = None
+    scale_factor: Optional[float] = None

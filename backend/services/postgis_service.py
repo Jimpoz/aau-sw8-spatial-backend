@@ -891,6 +891,40 @@ class PostGISService:
         session.commit()
         session.close()
 
+    def sync_space_geometry(self, space_data: dict) -> bool:
+        from services.sync_outbox import enqueue
+        return enqueue("sync_space_geometry", {"space_data": space_data})
+
+    def _apply_sync_space_geometry(self, space_data: dict) -> None:
+        session = self._open_session()
+        record = session.query(BuildingSpace).filter_by(
+            id=space_data["id"]
+        ).first()
+        if not record:
+            session.close()
+            return
+
+        record.centroid_lat = space_data.get("centroid_lat")
+        record.centroid_lng = space_data.get("centroid_lng")
+
+        polygon_global = space_data.get("polygon_global")
+        if polygon_global:
+            try:
+                poly_global = Polygon(polygon_global)
+                record.geometry_global = (
+                    "SRID=4326;POLYGON(("
+                    + ", ".join(f"{y} {x}" for x, y in poly_global.exterior.coords)
+                    + "))"
+                )
+            except Exception as e:
+                print(f"Error creating global polygon for {space_data['id']}: {e}")
+        else:
+            record.geometry_global = None
+
+        record.updated_at = datetime.utcnow()
+        session.commit()
+        session.close()
+
     # --- floors ---
 
     def sync_floor(self, floor_data: dict) -> bool:

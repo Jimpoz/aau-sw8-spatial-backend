@@ -2,14 +2,33 @@ from fastapi import APIRouter, HTTPException, Depends
 from db import Database, get_db
 from core.auth_principal import Principal, require_org_match, require_role
 from core.exceptions import BuildingNotFound, FloorNotFound
-from models.campus import Floor, FloorCreate
+from models.campus import Floor, FloorCreate, FloorUpdate
 from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
 from repositories.connection_repo import ConnectionRepository
 from services.audit_service import audit_action
+from services.geometry_service import (
+    local_to_global_coordinates,
+    polygon_local_to_global,
+)
 from services.postgis_service import PostGISService
 
 router = APIRouter(prefix="/floors", tags=["floors"])
+
+
+def _resolve_floor_origin(floor: dict, building: dict) -> dict:
+    """Fill a floor's georeferencing fields from the building when the floor
+    has no override of its own, so callers always see concrete values."""
+    resolved = dict(floor)
+    for field, default in (
+        ("origin_lat", building.get("origin_lat")),
+        ("origin_lng", building.get("origin_lng")),
+        ("origin_bearing", building.get("origin_bearing") or 0.0),
+        ("scale_factor", building.get("scale_factor") or 1.0),
+    ):
+        if resolved.get(field) is None:
+            resolved[field] = default
+    return resolved
 
 
 @router.post("", response_model=Floor, status_code=201)
@@ -61,10 +80,52 @@ def create_floor(
 
 @router.get("/{floor_id}", response_model=Floor)
 def get_floor(floor_id: str, db: Database = Depends(get_db)):
+    repo = CampusRepository(db)
     try:
-        return CampusRepository(db).get_floor(floor_id)
+        floor = repo.get_floor(floor_id)
     except FloorNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+    try:
+        building = repo.get_building(floor["building_id"])
+    except BuildingNotFound:
+        return floor
+    return _resolve_floor_origin(floor, building)
+
+
+@router.patch("/{floor_id}", response_model=Floor)
+def update_floor(
+    floor_id: str,
+    data: FloorUpdate,
+    db: Database = Depends(get_db),
+    principal: Principal = Depends(require_role("editor")),
+):
+    """Reposition / rotate / resize a single floor. Stores a per-floor origin
+    override and recomputes only that floor's spaces."""
+    repo = CampusRepository(db)
+    try:
+        floor = repo.get_floor(floor_id)
+        building = repo.get_building(floor["building_id"])
+    except (FloorNotFound, BuildingNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    org_id = building.get("organization_id") if isinstance(building, dict) else None
+    require_org_match(principal, org_id)
+
+    with audit_action("update_floor", principal, organization_id=org_id) as detail:
+        detail["floor_id"] = floor_id
+        try:
+            result = repo.update_floor(floor_id, data)
+        except FloorNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        updated_floor = result["floor"]
+        updated_spaces = result["updated_spaces"]
+        detail["spaces_recomputed"] = len(updated_spaces)
+
+        pg = PostGISService()
+        for space in updated_spaces:
+            pg.sync_space_geometry(space)
+
+    return _resolve_floor_origin(updated_floor, building)
 
 
 @router.get("/{floor_id}/spaces")
@@ -81,19 +142,78 @@ def floor_display(floor_id: str, db: Database = Depends(get_db)):
     """
     Return all spaces with polygons for iOS map overlay rendering.
     """
+    repo = CampusRepository(db)
     try:
-        CampusRepository(db).get_floor(floor_id)
+        floor = repo.get_floor(floor_id)
     except FloorNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    building = None
+    if floor.get("building_id"):
+        try:
+            building = repo.get_building(floor["building_id"])
+        except BuildingNotFound:
+            building = None
+    resolved = _resolve_floor_origin(floor, building or {})
+    g_lat = resolved.get("origin_lat")
+    g_lng = resolved.get("origin_lng")
+    g_bearing = resolved.get("origin_bearing") or 0.0
+    g_scale = resolved.get("scale_factor") or 1.0
+
+    def _stamp_global(s: dict) -> None:
+        """Rewrite polygon_global + centroid_lat/lon from the floor's
+        current georef. Only runs when we have an origin to project from
+        and the space has local coords."""
+        if g_lat is None or g_lng is None:
+            return
+        poly = s.get("polygon")
+        if poly and len(poly) >= 3:
+            try:
+                s["polygon_global"] = polygon_local_to_global(
+                    poly, g_lat, g_lng, g_bearing, g_scale,
+                )
+            except Exception:
+                pass
+        cx = s.get("centroid_x")
+        cy = s.get("centroid_y")
+        if cx is not None and cy is not None:
+            try:
+                lat, lng = local_to_global_coordinates(
+                    cx, cy, g_lat, g_lng, g_bearing, g_scale,
+                )
+                s["centroid_lat"] = lat
+                s["centroid_lon"] = lng
+                s["centroid_lng"] = lng
+            except Exception:
+                pass
 
     postgis = PostGISService()
     pg_spaces = postgis.get_floor_spaces(floor_id) or []
     pg_ids = {s["id"] for s in pg_spaces if s.get("id")}
 
     neo4j_spaces = SpaceRepository(db).get_floor_display(floor_id) or []
+
+    render_order_by_id = {
+        s["id"]: s.get("render_order")
+        for s in neo4j_spaces
+        if s.get("id") and s.get("render_order") is not None
+    }
+    for s in pg_spaces:
+        ro = render_order_by_id.get(s.get("id"))
+        if ro is not None:
+            s["render_order"] = ro
+        _stamp_global(s)
+
     missing = [s for s in neo4j_spaces if s.get("id") and s["id"] not in pg_ids]
-    extras = [
-        {
+    def _z_key(s: dict) -> int:
+        ro = s.get("render_order")
+        try:
+            return int(ro) if ro is not None else 0
+        except (TypeError, ValueError):
+            return 0
+    extras = []
+    for s in missing:
+        item = {
             "id": s["id"],
             "display_name": s.get("display_name"),
             "space_type": s.get("space_type"),
@@ -106,10 +226,11 @@ def floor_display(floor_id: str, db: Database = Depends(get_db)):
             "is_accessible": s.get("is_accessible", True),
             "is_navigable": s.get("is_navigable", True),
             "capacity": s.get("capacity"),
+            "render_order": s.get("render_order"),
         }
-        for s in missing
-    ]
-    return [*pg_spaces, *extras]
+        _stamp_global(item)
+        extras.append(item)
+    return sorted([*pg_spaces, *extras], key=_z_key)
 
 
 @router.get("/{floor_id}/connections")

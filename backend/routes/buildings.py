@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from db import Database, get_db
 from core.auth_principal import Principal, get_principal, require_org_match, require_role
 from core.exceptions import BuildingNotFound, CampusNotFound
-from models.campus import Building, BuildingCreate, VisibleBuilding
+from models.campus import Building, BuildingCreate, BuildingUpdate, VisibleBuilding
 from repositories.campus_repo import CampusRepository
 from services.audit_service import audit_action
 from services.postgis_service import PostGISService
@@ -67,6 +67,51 @@ def list_floors(building_id: str, db: Database = Depends(get_db)):
     except BuildingNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     return CampusRepository(db).list_floors(building_id)
+
+
+@router.put("/{building_id}", response_model=Building)
+def update_building(
+    building_id: str,
+    data: BuildingUpdate,
+    db: Database = Depends(get_db),
+    principal: Principal = Depends(require_role("editor")),
+):
+    """Reposition / rotate / resize a building."""
+    try:
+        existing = CampusRepository(db).get_building(building_id)
+    except BuildingNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    org_id = existing.get("organization_id") if isinstance(existing, dict) else None
+    require_org_match(principal, org_id)
+
+    with audit_action("update_building", principal, organization_id=org_id) as detail:
+        detail["building_id"] = building_id
+        try:
+            result = CampusRepository(db).update_building(building_id, data)
+        except BuildingNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        building = result["building"]
+        updated_spaces = result["updated_spaces"]
+        detail["spaces_recomputed"] = len(updated_spaces)
+
+        pg = PostGISService()
+        pg.sync_building({
+            "id": building["id"],
+            "campus_id": building.get("campus_id"),
+            "organization_id": building.get("organization_id"),
+            "name": building.get("name"),
+            "short_name": building.get("short_name"),
+            "address": building.get("address"),
+            "origin_lat": building.get("origin_lat"),
+            "origin_lng": building.get("origin_lng"),
+            "origin_bearing": building.get("origin_bearing"),
+            "floor_count": building.get("floor_count"),
+        })
+        for space in updated_spaces:
+            pg.sync_space_geometry(space)
+
+    return building
 
 
 @router.delete("/{building_id}", status_code=204)

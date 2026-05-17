@@ -470,6 +470,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     <div class="ctx-item" id="ctx-move">&#9994; Move</div>
     <div class="ctx-item" id="ctx-duplicate">&#10064; Duplicate</div>
     <div class="ctx-sep"></div>
+    <div class="ctx-item" id="ctx-front">&#8593; Bring to front</div>
+    <div class="ctx-item" id="ctx-back">&#8595; Send to back</div>
+    <div class="ctx-sep"></div>
     <div class="ctx-item danger" id="ctx-delete">&#10006; Delete</div>
   </div>
 </div>
@@ -1853,7 +1856,16 @@ function flattenSpaces(spaces, depth) {
       result.push(...flattenSpaces(s.subspaces, depth + 1));
     }
   }
-  if (depth === 0) result.sort((a, b) => (a.z_index || 0) - (b.z_index || 0));
+  if (depth === 0) {
+    // Primary sort by z_index (subspaces always above their parent).
+    // Secondary by render_order — the persisted per-space "send to back /
+    // bring to front" tweak. Default 0 for spaces without one.
+    result.sort((a, b) => {
+      const dz = (a.z_index || 0) - (b.z_index || 0);
+      if (dz !== 0) return dz;
+      return (a.render_order || 0) - (b.render_order || 0);
+    });
+  }
   return result;
 }
 
@@ -2968,11 +2980,70 @@ $('ctx-duplicate').addEventListener('click', () => {
   duplicateSpace(state.contextMenu.space);
   hideContextMenu();
 });
+$('ctx-front').addEventListener('click', () => {
+  if (!state.contextMenu) return;
+  reorderSpace(state.contextMenu.space, 'front');
+  hideContextMenu();
+});
+$('ctx-back').addEventListener('click', () => {
+  if (!state.contextMenu) return;
+  reorderSpace(state.contextMenu.space, 'back');
+  hideContextMenu();
+});
 $('ctx-delete').addEventListener('click', () => {
   if (!state.contextMenu) return;
   deleteSpace(state.contextMenu.space);
   hideContextMenu();
 });
+
+// Reorder a space by writing a new render_order to the server. We pick a
+// value one past the current extreme among same-z_index siblings so the
+// reorder is unambiguous, then optimistically update local state and
+// re-render. Persists across reloadCurrentFloor because the server now
+// returns render_order on Space and flattenSpaces uses it as a sort
+// tiebreaker after z_index.
+async function reorderSpace(space, position) {
+  const z = space.z_index || 0;
+  const siblings = state.spaces.filter(s => (s.z_index || 0) === z);
+  const orders = siblings.map(s => s.render_order || 0);
+  const newOrder = position === 'front'
+    ? Math.max(0, ...orders) + 1
+    : Math.min(0, ...orders) - 1;
+
+  const prevOrder = space.render_order;
+  space.render_order = newOrder;
+  // Re-sort state.spaces by the same key flattenSpaces uses so render()
+  // paints in the new order immediately.
+  state.spaces.sort((a, b) => {
+    const dz = (a.z_index || 0) - (b.z_index || 0);
+    if (dz !== 0) return dz;
+    return (a.render_order || 0) - (b.render_order || 0);
+  });
+  render();
+
+  try {
+    await api(`/spaces/${space.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ render_order: newOrder }),
+    });
+  } catch (e) {
+    // Roll back the local change — api() already notified.
+    space.render_order = prevOrder;
+    state.spaces.sort((a, b) => {
+      const dz = (a.z_index || 0) - (b.z_index || 0);
+      if (dz !== 0) return dz;
+      return (a.render_order || 0) - (b.render_order || 0);
+    });
+    render();
+    return;
+  }
+
+  // Same reload+graph-refresh flow as info-save and connection-add —
+  // proves the persisted value round-trips from the server.
+  await reloadCurrentFloor();
+  api('/navigate/refresh-graph', { method: 'POST' }).catch(() => {});
+}
 
 /* ═══════════════════════════════════════════════
    Info Modal (Editable)
@@ -3189,8 +3260,14 @@ $('info-save').addEventListener('click', async () => {
         polygon: newPoly,
       }),
     });
+  } catch (e) {
+    // Primary PATCH failed — api() already notified. Skip reload.
+    return;
+  }
 
-    // Save connection (door node) edits
+  // Save connection (door node) edits in their own try so a stale doorId
+  // or transient failure can't block the reload+rerender below.
+  try {
     const connSaves = [...document.querySelectorAll('.conn-type-select')].map(sel => {
       const doorId = sel.dataset.doorId;
       const check = document.querySelector(`.conn-accessible-check[data-door-id="${doorId}"]`);
@@ -3201,11 +3278,12 @@ $('info-save').addEventListener('click', async () => {
       });
     });
     await Promise.all(connSaves);
+  } catch (e) { /* api() already notified */ }
 
-    notify(`Updated "${newName}"`);
-    $('info-overlay').style.display = 'none';
-    await reloadCurrentFloor();
-  } catch (e) { /* handled */ }
+  notify(`Updated "${newName}"`);
+  $('info-overlay').style.display = 'none';
+  await reloadCurrentFloor();
+  api('/navigate/refresh-graph', { method: 'POST' }).catch(() => {});
 });
 
 $('analyze-room-btn').addEventListener('click', async () => {
@@ -3569,7 +3647,12 @@ async function reloadCurrentFloor() {
       state.currentFloorIndex = null;
       state.currentBuildingId = state.selectedBuildingId;
     }
-    fitToCanvas();
+    // Preserve the user's pan/zoom across reloads (e.g. after adding a
+    // door). Only auto-fit on the very first load of a floor — otherwise
+    // every authoring action would yank the view back to fit-all.
+    if (!state.bounds) {
+      fitToCanvas();
+    }
     updateMapVisibility();
     await loadFloorConnections(state.selectedFloorId);
     render();

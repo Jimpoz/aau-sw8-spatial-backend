@@ -82,10 +82,11 @@ _INSUNITS_TO_METERS: dict[int, float] = {
 
 _MIN_ROOM_AREA = 0.5                  # raw-unit early degenerate-polygon filter
 _MIN_ROOM_AREA_M2 = 1.5               # post-scaling
-_MAX_ROOM_AREA_M2 = 500.0             # rooms larger than this are envelopes/courtyards
-_LABEL_BOUNDARY_BUFFER_M = 0.6        # narrow tolerance for "label on the wall"
-_NEAREST_LABEL_FALLBACK_M = 3.0       # leader-line / external-label adoption (after primary attach fails)
+_MAX_ROOM_AREA_M2 = 5000.0
+_LABEL_BOUNDARY_BUFFER_M = 0.1
+_NEAREST_LABEL_FALLBACK_M = 1.0       # tight leader-line tolerance — broad fallback was adopting random text onto slivers
 _MIN_ROOM_AREA_FOR_LABEL_M2 = 2.0     # below this, a polygon won't steal a contained label
+_MIN_ROOM_SHORT_SIDE_M = 0.6
 _DOOR_ARC_RADIUS_RANGE_M = (0.4, 1.5)
 _DOOR_ARC_SWEEP_DEG = (45.0, 130.0)
 _DOOR_CONNECTION_THRESHOLD_M = 0.4
@@ -370,6 +371,43 @@ def _filter_by_labels(
     return kept, warnings, stats
 
 
+def _drop_slivers(
+    rooms: list[dict],
+    *,
+    min_short_side_m: float = _MIN_ROOM_SHORT_SIDE_M,
+) -> tuple[list[dict], int]:
+    """Drop polygons whose minimum-rotated-rectangle short side is below
+    `min_short_side_m` — these are likely wall slivers, not real rooms."""
+    if not rooms:
+        return rooms, 0
+    kept: list[dict] = []
+    dropped = 0
+    for r in rooms:
+        coords = r.get("polygon") or []
+        if len(coords) < 3:
+            continue
+        short_side: Optional[float] = None
+        try:
+            poly = Polygon(coords)
+            mrr = poly.minimum_rotated_rectangle
+            ring = list(mrr.exterior.coords)
+            if len(ring) >= 3:
+                side_a = math.hypot(ring[1][0] - ring[0][0], ring[1][1] - ring[0][1])
+                side_b = math.hypot(ring[2][0] - ring[1][0], ring[2][1] - ring[1][1])
+                short_side = min(side_a, side_b)
+        except Exception:
+            short_side = None
+        if short_side is None:
+            xs = [p[0] for p in coords]
+            ys = [p[1] for p in coords]
+            short_side = min(max(xs) - min(xs), max(ys) - min(ys))
+        if short_side < min_short_side_m:
+            dropped += 1
+            continue
+        kept.append(r)
+    return kept, dropped
+
+
 def _drop_outer_envelopes(rooms: list[dict]) -> tuple[list[dict], int]:
     """Drop polygons that fully contain three or more other accepted
     polygons — these are whole-floor outlines, not rooms.
@@ -386,6 +424,8 @@ def _drop_outer_envelopes(rooms: list[dict]) -> tuple[list[dict], int]:
     drop: set[int] = set()
     for i, big in enumerate(shapes):
         if big is None or i in drop:
+            continue
+        if rooms[i].get("label"):
             continue
         contained = 0
         for j, s in enumerate(shapes):
