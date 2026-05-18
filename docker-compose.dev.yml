@@ -56,6 +56,10 @@ services:
     depends_on:
       - neo4j
 
+  indoor_data_pipeline:
+    ports:
+      - "6969:6969"
+
 volumes:
   neo4j_data:
 

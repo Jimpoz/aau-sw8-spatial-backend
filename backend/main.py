@@ -25,6 +25,7 @@ from routes import (
     auth,
 )
 from scripts.init_db import apply_schema
+from services.gds_service import GdsService
 from services.postgis_service import PostGISService
 from services.sync_outbox import get_worker as get_sync_outbox_worker
 from routes import admin as admin_routes
@@ -48,6 +49,10 @@ async def lifespan(app: FastAPI):
     apply_schema(db)
     if settings.auth_rls_enabled:
         PostGISService().apply_rls_policies()
+    try:
+        GdsService(db).refresh_projection()
+    except Exception:
+        pass
     worker = get_sync_outbox_worker()
     worker.start()
     try:

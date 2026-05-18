@@ -1004,17 +1004,30 @@ function render() {
     const isConnType = st.includes('DOOR') || st === 'PASSAGE';
 
     if (!space.polygon || space.polygon.length < 3) {
-      // Draw connection nodes (doors/passages) as small rectangles at centroid
+      
       if (isConnType && space.centroid_x != null && space.centroid_y != null) {
         const [cx, cy] = worldToCanvas(space.centroid_x, space.centroid_y);
         const size = Math.max(4, effScale * 0.6);
-        const fill = COLORS[space.space_type] || '#D4A574';
         ctx.save();
-        ctx.fillStyle = fill;
-        ctx.strokeStyle = '#999';
-        ctx.lineWidth = 0.5;
-        ctx.fillRect(cx - size, cy - size/2, size * 2, size);
-        ctx.strokeRect(cx - size, cy - size/2, size * 2, size);
+        if (st === 'PASSAGE') {
+          // Two short verticals = doorway/gateway pictogram
+          ctx.strokeStyle = '#7a99b8';
+          ctx.lineWidth = Math.max(1.5, effScale * 0.08);
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(cx - size, cy - size / 2);
+          ctx.lineTo(cx - size, cy + size / 2);
+          ctx.moveTo(cx + size, cy - size / 2);
+          ctx.lineTo(cx + size, cy + size / 2);
+          ctx.stroke();
+        } else {
+          // Doors: solid filled rectangle (unchanged)
+          ctx.fillStyle = COLORS[space.space_type] || '#D4A574';
+          ctx.strokeStyle = '#999';
+          ctx.lineWidth = 0.5;
+          ctx.fillRect(cx - size, cy - size / 2, size * 2, size);
+          ctx.strokeRect(cx - size, cy - size / 2, size * 2, size);
+        }
         if (showLabels) {
           const fontSize = Math.min(10, Math.max(7, effScale * 0.5));
           ctx.font = `${fontSize}px -apple-system, sans-serif`;
@@ -1140,25 +1153,40 @@ function render() {
       const sx = x1 + ux * shrink, sy = y1 + uy * shrink;
       const ex = x2 - ux * shrink, ey = y2 - uy * shrink;
 
-      ctx.save();
-      ctx.strokeStyle = 'rgba(150,150,150,0.5)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(ex, ey);
-      ctx.stroke();
+      const isOpen = String(conn.connection_type || '').toUpperCase() === 'OPEN';
 
-      // Arrowhead at target end
-      ctx.fillStyle = 'rgba(150,150,150,0.7)';
-      const angle = Math.atan2(ey - sy, ex - sx);
-      ctx.translate(ex, ey);
-      ctx.rotate(angle);
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-8, -4);
-      ctx.lineTo(-8, 4);
-      ctx.closePath();
-      ctx.fill();
+      ctx.save();
+      if (isOpen) {
+        // Open connection = no physical barrier. Soft dashed line, no
+        // arrowhead, so it reads as "these two rooms flow into each
+        // other" rather than a directed door traversal.
+        ctx.strokeStyle = 'rgba(120,150,180,0.45)';
+        ctx.lineWidth = 1.25;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = 'rgba(150,150,150,0.5)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+
+        // Arrowhead at target end (door/passage path)
+        ctx.fillStyle = 'rgba(150,150,150,0.7)';
+        const angle = Math.atan2(ey - sy, ex - sx);
+        ctx.translate(ex, ey);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(-8, -4);
+        ctx.lineTo(-8, 4);
+        ctx.closePath();
+        ctx.fill();
+      }
       ctx.restore();
     }
   }

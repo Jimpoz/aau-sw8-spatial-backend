@@ -101,4 +101,5 @@ def build_space_sync_payload(
         "capacity": space.get("capacity"),
         "tags": space.get("tags", []),
         "metadata": space.get("metadata", {}),
+        "embedding": space.get("embedding"),
     }

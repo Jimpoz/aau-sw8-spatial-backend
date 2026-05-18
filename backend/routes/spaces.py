@@ -7,6 +7,7 @@ from repositories.space_repo import SpaceRepository
 from repositories.connection_repo import ConnectionRepository
 from repositories.campus_repo import CampusRepository
 from services.audit_service import audit_action
+from services.embed_client import maybe_regenerate_embedding
 from services.postgis_service import PostGISService
 from services.space_sync import build_space_sync_payload
 
@@ -65,6 +66,7 @@ def update_space(
         raise HTTPException(status_code=404, detail=str(e))
     org_id = existing.get("organization_id") if isinstance(existing, dict) else None
     require_org_match(principal, org_id)
+    data = maybe_regenerate_embedding(data, existing)
     with audit_action("update_space", principal, organization_id=org_id) as detail:
         detail["space_id"] = space_id
         try:

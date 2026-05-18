@@ -1,7 +1,13 @@
+import json
+
 from db import Database
 from models.navigation import Route, RouteStep, FloorChange, BuildingChange
 from models.enums import SpaceType
 from repositories.navigation_repo import NavigationRepository
+from services.geometry_service import (
+    find_shared_edge_midpoint,
+    local_to_global_coordinates,
+)
 
 
 def _instruction(node: dict) -> str:
@@ -33,7 +39,220 @@ def _instruction(node: dict) -> str:
 
 class NavigationService:
     def __init__(self, db: Database):
+        self.db = db
         self.repo = NavigationRepository(db)
+
+    def _georef_by_id(self, space_ids: list[str]) -> dict[str, dict]:
+        """Bulk-fetch the (floor-override → building-inherit) georef for
+        every Space id. Cached per request so the polyline builder and
+        the centroid enricher share one Neo4j round-trip."""
+        if not space_ids:
+            return {}
+        rows = self.db.execute(
+            """
+            MATCH (s:Space) WHERE s.id IN $ids
+            OPTIONAL MATCH (b1:Building)-[:HAS_FLOOR]->(f:Floor)-[:HAS_SPACE]->(s)
+            OPTIONAL MATCH (b2:Building {id: s.building_id})
+            WITH s, f, coalesce(b1, b2) AS b
+            RETURN s.id AS id,
+                   f.origin_lat AS f_lat, f.origin_lng AS f_lng,
+                   f.origin_bearing AS f_bearing, f.scale_factor AS f_scale,
+                   b.origin_lat AS b_lat, b.origin_lng AS b_lng,
+                   b.origin_bearing AS b_bearing, b.scale_factor AS b_scale
+            """,
+            {"ids": list(space_ids)},
+        )
+        out: dict[str, dict] = {}
+        for r in rows:
+            origin_lat = r["f_lat"] if r["f_lat"] is not None else r["b_lat"]
+            origin_lng = r["f_lng"] if r["f_lng"] is not None else r["b_lng"]
+            bearing = (r["f_bearing"] if r["f_bearing"] is not None else r["b_bearing"]) or 0.0
+            scale = (r["f_scale"] if r["f_scale"] is not None else r["b_scale"]) or 1.0
+            out[r["id"]] = {
+                "origin_lat": origin_lat,
+                "origin_lng": origin_lng,
+                "bearing": bearing,
+                "scale": scale,
+            }
+        return out
+
+    _ROOM_PULL_FACTOR: float = 0.35
+
+    def _build_polyline(
+        self,
+        path_nodes: list[dict],
+        georefs: dict[str, dict],
+    ) -> list[list[float]]:
+        """Build the rendered route line."""
+
+        if len(path_nodes) < 2:
+            return [
+                [n["centroid_lat"], n["centroid_lng"]]
+                for n in path_nodes
+                if n.get("centroid_lat") is not None
+                and n.get("centroid_lng") is not None
+            ]
+
+        n = len(path_nodes)
+        transitions: list[list[float] | None] = [
+            self._shared_edge_waypoint(path_nodes[i], path_nodes[i + 1], georefs)
+            for i in range(n - 1)
+        ]
+
+        def _global_centroid(node: dict, i: int) -> list[float] | None:
+            """Resolve a node's centroid in world coords, projecting
+            from local coords via a neighbor's georef if the globals
+            are missing (e.g. door Spaces with no HAS_SPACE link AND
+            no building_id property)."""
+            lat = node.get("centroid_lat")
+            lng = node.get("centroid_lng")
+            if (lat is None or lng is None) and node.get("centroid_x") is not None and node.get("centroid_y") is not None:
+                neighbor_g = None
+                for nbr_idx in (i - 1, i + 1):
+                    if 0 <= nbr_idx < n:
+                        g = georefs.get(path_nodes[nbr_idx]["id"])
+                        if g and g["origin_lat"] is not None and g["origin_lng"] is not None:
+                            neighbor_g = g
+                            break
+                if neighbor_g is not None:
+                    lat, lng = local_to_global_coordinates(
+                        node["centroid_x"], node["centroid_y"],
+                        neighbor_g["origin_lat"], neighbor_g["origin_lng"],
+                        neighbor_g["bearing"], neighbor_g["scale"],
+                    )
+                    node["centroid_lat"] = lat
+                    node["centroid_lng"] = lng
+            if lat is None or lng is None:
+                return None
+            return [float(lat), float(lng)]
+
+        centroids: list[list[float] | None] = [
+            _global_centroid(node, i) for i, node in enumerate(path_nodes)
+        ]
+
+        def _is_anchor(j: int) -> bool:
+            """Endpoint or connector — a node whose centroid we keep
+            as-is. These are the points the room-pull computation
+            triangulates against."""
+            if j == 0 or j == n - 1:
+                return True
+            return self._is_connector(path_nodes[j])
+
+        def _pulled_in_waypoint(i: int) -> list[float] | None:
+            room_c = centroids[i]
+            if room_c is None:
+                return None
+            prev_pt: list[float] | None = None
+            for j in range(i - 1, -1, -1):
+                if _is_anchor(j) and centroids[j] is not None:
+                    prev_pt = centroids[j]
+                    break
+            next_pt: list[float] | None = None
+            for j in range(i + 1, n):
+                if _is_anchor(j) and centroids[j] is not None:
+                    next_pt = centroids[j]
+                    break
+            if prev_pt is None or next_pt is None:
+                return room_c
+            mid_lat = (prev_pt[0] + next_pt[0]) / 2.0
+            mid_lng = (prev_pt[1] + next_pt[1]) / 2.0
+            alpha = self._ROOM_PULL_FACTOR
+            return [
+                mid_lat + alpha * (room_c[0] - mid_lat),
+                mid_lng + alpha * (room_c[1] - mid_lng),
+            ]
+
+        polyline: list[list[float]] = []
+        for i in range(n):
+            if _is_anchor(i):
+                if centroids[i] is not None:
+                    polyline.append(centroids[i])
+            else:
+                pulled = _pulled_in_waypoint(i)
+                if pulled is not None:
+                    polyline.append(pulled)
+            if i < n - 1 and transitions[i] is not None:
+                polyline.append(transitions[i])
+        return polyline
+
+    _CONNECTOR_SPACE_TYPES: frozenset[str] = frozenset({
+        "PASSAGE",
+        "ENTRANCE", "ENTRANCE_SECONDARY", "EXIT_EMERGENCY",
+        "STAIRCASE", "ELEVATOR", "ESCALATOR", "RAMP",
+    })
+
+    @classmethod
+    def _is_connector(cls, node: dict) -> bool:
+        st = (node.get("space_type") or "").upper()
+        if st.startswith("DOOR_"):
+            return True
+        return st in cls._CONNECTOR_SPACE_TYPES
+
+    def _shared_edge_waypoint(
+        self,
+        a: dict,
+        b: dict,
+        georefs: dict[str, dict],
+    ) -> list[float] | None:
+        """Return the world-coord midpoint of the wall shared by spaces
+        a and b, or None if either side has no polygon / no usable
+        georef. This is where the route line should pass through for the most accurate rendering (e.g. the door location instead of the room centroid)."""
+        if (a.get("building_id") != b.get("building_id")
+                or a.get("floor_index") != b.get("floor_index")):
+            return None
+
+        ga = georefs.get(a["id"]) or georefs.get(b["id"])
+        if not ga or ga["origin_lat"] is None or ga["origin_lng"] is None:
+            return None
+
+        poly_a = self._parse_polygon(a.get("polygon"))
+        poly_b = self._parse_polygon(b.get("polygon"))
+        if not poly_a or not poly_b:
+            return None
+        try:
+            mid = find_shared_edge_midpoint(poly_a, poly_b, eps=1.0)
+        except Exception:
+            return None
+        if mid is None:
+            return None
+        mx, my = mid
+        lat, lng = local_to_global_coordinates(
+            mx, my, ga["origin_lat"], ga["origin_lng"], ga["bearing"], ga["scale"],
+        )
+        return [float(lat), float(lng)]
+
+    @staticmethod
+    def _parse_polygon(raw) -> list | None:
+        if not raw:
+            return None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+        if not isinstance(raw, list) or len(raw) < 3:
+            return None
+        return raw
+
+    def _enrich_global_coords(
+        self, path_nodes: list[dict], georefs: dict[str, dict]
+    ) -> None:
+        """Fill missing centroid_lat/lng on every step using the
+        prefetched georef cache."""
+        for n in path_nodes:
+            if n.get("centroid_lat") is not None and n.get("centroid_lng") is not None:
+                continue
+            cx, cy = n.get("centroid_x"), n.get("centroid_y")
+            if cx is None or cy is None:
+                continue
+            g = georefs.get(n["id"])
+            if not g or g["origin_lat"] is None or g["origin_lng"] is None:
+                continue
+            lat, lng = local_to_global_coordinates(
+                cx, cy, g["origin_lat"], g["origin_lng"], g["bearing"], g["scale"],
+            )
+            n["centroid_lat"] = lat
+            n["centroid_lng"] = lng
 
     def get_route(
         self,
@@ -53,6 +272,12 @@ class NavigationService:
 
         path_nodes: list[dict] = raw["path_nodes"]
         total_cost: float = raw["total_cost"] or 0.0
+
+        georefs = self._georef_by_id([n["id"] for n in path_nodes])
+
+        self._enrich_global_coords(path_nodes, georefs)
+
+        polyline = self._build_polyline(path_nodes, georefs)
 
         steps: list[RouteStep] = []
         floor_changes: list[FloorChange] = []
@@ -115,4 +340,5 @@ class NavigationService:
             steps=steps,
             floor_changes=floor_changes,
             building_changes=building_changes,
+            polyline=polyline,
         )

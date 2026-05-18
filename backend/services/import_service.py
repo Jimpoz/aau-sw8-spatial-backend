@@ -378,6 +378,7 @@ class ImportService:
             "capacity": space.capacity,
             "tags": space.tags,
             "metadata": space.metadata,
+            "embedding": vector,
         })
 
         for subspace in space.subspaces:

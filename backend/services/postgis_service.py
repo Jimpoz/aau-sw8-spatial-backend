@@ -31,6 +31,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.dialects.postgresql import JSONB
 from geoalchemy2 import Geometry
 from geoalchemy2.shape import to_shape
+from pgvector.sqlalchemy import Vector
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse, quote
 import json
@@ -273,6 +274,12 @@ class BuildingSpace(Base):
     capacity = Column(Integer)
     tags = Column(String)
     meta_data = Column(String)
+    # 384-d sentence-transformer ("all-MiniLM-L6-v2") embedding of
+    # "{display_name}. Type: {space_type}. Tags: {tags}". Powers the
+    # assistant's vector search via the pgvector HNSW index
+    # (see _ensure_vector_index below). Written by sync_space; never
+    # mutated client-side.
+    embedding = Column(Vector(384), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -415,8 +422,17 @@ class PostGISService:
 
     def _init_db(self):
         if self.engine:
+            self._ensure_extensions()
             Base.metadata.create_all(bind=self.engine)
             self._ensure_columns()
+            self._ensure_vector_index()
+
+    def _ensure_extensions(self) -> None:
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        except Exception as exc:
+            print(f"[PostGISService] _ensure_extensions failed: {exc}")
 
     _ADDED_COLUMNS = (
         ("campuses", "is_public", "BOOLEAN NOT NULL DEFAULT FALSE"),
@@ -425,6 +441,7 @@ class PostGISService:
         ("app_users", "mfa_method", "VARCHAR NOT NULL DEFAULT 'totp'"),
         ("space_connections", "door_cx", "DOUBLE PRECISION"),
         ("space_connections", "door_cy", "DOUBLE PRECISION"),
+        ("building_spaces", "embedding", "vector(384)"),
     )
 
     def _ensure_columns(self) -> None:
@@ -436,6 +453,19 @@ class PostGISService:
                     ))
         except Exception as exc:
             print(f"[PostGISService] _ensure_columns failed: {exc}")
+
+    def _ensure_vector_index(self) -> None:
+        """HNSW index with cosine ops for the assistant's RAG retrieval.
+        IF NOT EXISTS makes this idempotent across cold starts."""
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS space_embedding_idx "
+                    "ON building_spaces USING hnsw "
+                    "(embedding vector_cosine_ops)"
+                ))
+        except Exception as exc:
+            print(f"[PostGISService] _ensure_vector_index failed: {exc}")
 
     # --- row-level security ---
     _RLS_PUBLIC_READ_TABLES = ("campuses", "buildings", "floors")
@@ -882,6 +912,8 @@ class PostGISService:
         record.capacity = space_data.get("capacity")
         record.tags = json.dumps(space_data.get("tags", []))
         record.meta_data = json.dumps(space_data.get("metadata", {}))
+        if space_data.get("embedding") is not None:
+            record.embedding = space_data["embedding"]
         if geom:
             record.geometry = geom
         if geom_global:

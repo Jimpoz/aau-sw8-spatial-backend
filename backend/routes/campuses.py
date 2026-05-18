@@ -10,9 +10,7 @@ from models.map_import import MapImportSchema
 from repositories.campus_repo import CampusRepository
 from repositories.space_repo import SpaceRepository
 from services.audit_service import audit_action
-from services.dxf_import_service import parse_layer_mapping
-from services.dxf_normalize import normalize_bytes
-from services.dxf_convert import convert as dxf_convert
+from services.dxf_client import parse_dxf as pipeline_parse_dxf, PipelineError
 from services.import_service import ImportService
 from services.gds_service import GdsService
 from services.postgis_service import PostGISService
@@ -206,37 +204,30 @@ async def import_dxf(
         raise HTTPException(status_code=422, detail="Uploaded file is empty.")
 
     try:
-        layer_overrides = parse_layer_mapping(layer_mapping)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    
-    def _run_pipeline() -> tuple[dict, dict]:
-        normalized = normalize_bytes(file_bytes, file.filename or "upload.dxf")
-        return dxf_convert(
-            normalized,
-            organization_id=organization_id,
-            organization_name=organization_name,
+        pipeline_response = await pipeline_parse_dxf(
+            file_bytes,
+            file.filename or "upload.dxf",
             campus_id=campus_id,
             campus_name=campus_name,
-            campus_description=building_name or None,
             building_id=building_id,
             building_name=building_name,
-            building_short_name=(building_name.split()[0] if building_name else None),
             floor_id=floor_id,
             floor_index=floor_index,
             floor_display_name=floor_display_name,
+            organization_id=organization_id,
+            organization_name=organization_name,
+            campus_description=building_name or None,
+            building_short_name=(building_name.split()[0] if building_name else None),
             origin_bearing=origin_bearing,
-            layer_mapping=layer_overrides,
+            layer_mapping=layer_mapping,
         )
-
-    try:
-        schema_dict, summary = await asyncio.to_thread(_run_pipeline)
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=415, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    except PipelineError as exc:
+        raise HTTPException(status_code=exc.status, detail=exc.detail)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"DXF parse failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"Indoor data pipeline unreachable: {exc}")
+
+    schema_dict = pipeline_response["schema"]
+    summary = pipeline_response["summary"]
 
     warnings = list(summary.get("warnings") or [])
     classification = dict(summary.get("classification_summary") or {})
@@ -284,8 +275,6 @@ async def import_dxf(
 
     from services.audit_service import write_audit_log
     try:
-        # Neo4j writes + GDS refresh are also blocking; thread them too so
-        # the async route never holds the event loop while the DB works.
         result = await asyncio.to_thread(ImportService(db).import_map, schema)
         await asyncio.to_thread(GdsService(db).refresh_projection)
         write_audit_log(
@@ -322,11 +311,7 @@ async def import_dxf(
 def export_map(campus_id: str, db: Database = Depends(get_db)):
     """Export a campus as a JSON document that can be re-imported through
     `POST /campuses/{campus_id}/import` without modification — the shape
-    matches `MapImportSchema` exactly. The `connections` array carries
-    pairwise edges in the `{from_space_id, to_space_id, connection_type,
-    is_accessible}` shape the import expects, sourced from the
-    PostGIS-mirrored `space_connections` table when available and
-    derived from Neo4j `:CONNECTS_TO` edges otherwise."""
+    matches `MapImportSchema` exactly."""
 
     try:
         campus = CampusRepository(db).get_campus(campus_id)
@@ -376,8 +361,6 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
     if not connections_out:
         connections_out = _derive_connections_from_neo4j(db, campus_id)
 
-    # Enrich any connection that names a `door_id` but doesn't already carry
-    # the door's centroid (PostGIS path) by looking up the door Space.
     door_ids_to_lookup = {
         c["door_id"] for c in connections_out
         if c.get("door_id") and (c.get("door_cx") is None or c.get("door_cy") is None)
@@ -475,14 +458,7 @@ def export_map(campus_id: str, db: Database = Depends(get_db)):
 
 def _derive_connections_from_neo4j(db, campus_id: str) -> list[dict]:
     """Fallback path: compute the import-compatible connections list
-    directly from Neo4j `:CONNECTS_TO` edges.
-
-    Room→Door→Room patterns are collapsed to a single logical Room↔Room
-    connection per (ordered) pair, with the door's centroid carried through
-    as `door_cx`/`door_cy` so re-imports preserve the door midpoint. Any
-    edges that don't fit the door pattern (e.g. STAIRCASE→STAIRCASE,
-    ELEVATOR↔ELEVATOR, direct edges from older imports) pass through as
-    direct edges with the same heuristic connection_type as before."""
+    directly from Neo4j `:CONNECTS_TO` edges."""
     rows = db.execute(
         """
         MATCH (a:Space {campus_id: $campus_id})-[:CONNECTS_TO]->(b:Space)
@@ -532,7 +508,6 @@ def _derive_connections_from_neo4j(db, campus_id: str) -> list[dict]:
 
     for g in door_groups.values():
         endpoints = list(g["endpoints"].items())
-        # Strip "DOOR_" prefix to get the DoorType enum value (STANDARD, ...).
         door_type_suffix = (
             g["door_type"].split("DOOR_", 1)[1]
             if g["door_type"].startswith("DOOR_") else None

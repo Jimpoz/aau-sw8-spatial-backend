@@ -7,3 +7,6 @@ sentence-transformers>=2.5
 transformers>=4.38
 torch>=2.2
 accelerate>=0.27
+sqlalchemy>=2.0,<3.0
+psycopg2-binary>=2.9,<3.0
+pgvector>=0.2.5,<1.0

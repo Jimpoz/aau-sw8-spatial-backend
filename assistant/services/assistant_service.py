@@ -23,6 +23,29 @@ def _get_device_dtype():
 
 DEVICE, DTYPE = _get_device_dtype()
 
+if DEVICE.type == "cuda":
+    try:
+        _gpu_name = torch.cuda.get_device_name(0)
+        _gpu_count = torch.cuda.device_count()
+    except Exception:
+        _gpu_name, _gpu_count = "unknown", "?"
+    print(
+        f"[assistant_service] inference device: CUDA ({_gpu_name}, "
+        f"{_gpu_count} device(s)), dtype={DTYPE}",
+        flush=True,
+    )
+elif DEVICE.type == "mps":
+    print(
+        f"[assistant_service] inference device: Apple MPS, dtype={DTYPE}",
+        flush=True,
+    )
+else:
+    print(
+        f"[assistant_service] inference device: CPU (no CUDA / MPS), "
+        f"dtype={DTYPE} - LLM will be slow",
+        flush=True,
+    )
+
 try:
     torch.set_num_threads(max(1, os.cpu_count() or 4))
 except Exception:
@@ -165,8 +188,8 @@ def _generate_sync(messages: List[Dict[str, str]]) -> str:
     return clean_response(response)
 
 class AssistantService:
-    def __init__(self, db):
-        self.repo = AssistantRepository(db)
+    def __init__(self, db, pg_db=None):
+        self.repo = AssistantRepository(db, pg_db=pg_db)
 
     async def _encode_query(self, text: str) -> List[float]:
         cached = _embed_cache_get(text)
@@ -179,6 +202,42 @@ class AssistantService:
         )
         _embed_cache_put(text, vec)
         return vec
+
+    def _where_am_i_intent(self, user_query: str) -> str | None:
+        """Return one of 'campus' | 'building' | 'general' for the
+        respective "where am I"-style questions, or None when nothing
+        matches. Caught before RAG so we can answer from GPS instead
+        of letting the LLM echo the question (a small-model failure
+        mode when context is uninformative)."""
+        q = user_query.lower()
+        campus_patterns = [
+            r"\b(which|what)\s+campus\s+(am\s+i\s+(in|on)|is\s+this)\b",
+            r"\b(in|on)\s+(which|what)\s+campus\s+am\s+i\b",
+            r"\bwhat\s+campus\b.*\bi\b",
+        ]
+        if any(re.search(p, q) for p in campus_patterns):
+            return "campus"
+        building_patterns = [
+            r"\b(which|what)\s+building\s+(am\s+i\s+(in|on)|is\s+this|am\s+i)\b",
+            r"\b(in|on)\s+(which|what)\s+building\s+am\s+i\b",
+            r"\bwhat'?s?\s+(this|the)\s+building\b",
+            r"\bbuilding\b.*\b(am\s+i|i\s+am|i'?m|this|here)\b",
+            r"\b(am\s+i|i\s+am|i'?m|this|here)\b.*\bbuilding\b",
+        ]
+        if any(re.search(p, q) for p in building_patterns):
+            return "building"
+        general_patterns = [
+            r"\bwhere\s+am\s+i\b",
+            r"\bwhere\s+i\s+am\b",
+            r"\b(what|which)\s+room\s+(am\s+i\s+in|is\s+this)\b",
+            r"\bin\s+(what|which)\s+room\s+am\s+i\b",
+            r"\bmy\s+(current\s+)?location\b",
+            r"\blocate\s+me\b",
+            r"\bam\s+i\s+in\b",
+        ]
+        if any(re.search(p, q) for p in general_patterns):
+            return "general"
+        return None
 
     def _floor_intent(self, user_query: str) -> int | None:
         """
@@ -252,8 +311,71 @@ class AssistantService:
         user_query: str,
         campus_id: str,
         building_id: str | None = None,
+        user_lat: float | None = None,
+        user_lon: float | None = None,
     ) -> Dict[str, Any]:
         t0 = time.perf_counter()
+
+        print(
+            f"[chat] received: query={user_query!r} campus={campus_id!r} "
+            f"ios_building={building_id!r} gps=({user_lat}, {user_lon})",
+            flush=True,
+        )
+
+        loc = None
+        if user_lat is not None and user_lon is not None:
+            loc = self.repo.locate_user(campus_id, user_lat, user_lon)
+        user_building_id = loc.get("building_id") if loc else None
+        user_building_name = loc.get("building_name") if loc else None
+
+        print(
+            f"[chat] locate_user: building={user_building_name!r} "
+            f"building_id={user_building_id!r} "
+            f"inside={loc.get('inside') if loc else None} "
+            f"nearest_space={loc.get('name') if loc else None}",
+            flush=True,
+        )
+
+        effective_building_id = user_building_id or building_id
+
+        loc_intent = self._where_am_i_intent(user_query)
+        print(f"[chat] intent: {loc_intent!r}", flush=True)
+        if loc_intent is not None:
+            if user_lat is None or user_lon is None:
+                return {
+                    "answer": "I don't have your location yet — please make sure location is enabled in the app.",
+                    "sources": [],
+                }
+            if not loc:
+                return {
+                    "answer": "I can't see any rooms near you on this campus.",
+                    "sources": [],
+                }
+            building = loc.get("building_name") or "the building"
+            floor = loc.get("floor_name")
+            dist = int(round(loc["distance_m"]))
+
+            if loc_intent == "campus":
+                campus_name = self.repo.get_campus_name(campus_id) or "this campus"
+                if loc["inside"]:
+                    ans = f"You're in {campus_name}, inside {building}."
+                else:
+                    ans = f"You're on {campus_name}, near {building} (about {dist} m away)."
+                return {"answer": ans, "sources": [campus_name]}
+
+            if loc_intent == "building":
+                if loc["inside"]:
+                    ans = f"You're in {building}."
+                else:
+                    ans = f"You're near {building} (about {dist} m away)."
+                return {"answer": ans, "sources": [building]}
+
+            floor_part = f" on {floor}" if floor else ""
+            if loc["inside"]:
+                ans = f"You're in {loc['name']}{floor_part} in {building}."
+            else:
+                ans = f"You're near {loc['name']}{floor_part} in {building} (about {dist} m away)."
+            return {"answer": ans, "sources": [loc["name"]]}
 
         # Determine if user requested a global map question
         if self._needs_global_map(user_query):
@@ -308,8 +430,66 @@ class AssistantService:
             similar_spaces = spaces
         else:
             query_vector = await self._encode_query(user_query)
-            similar_spaces = self.repo.search_similar_spaces(
-                campus_id, query_vector, limit=10, building_id=building_id,
+            radius_m = 200.0 if (user_lat is not None and user_lon is not None) else None
+
+            similar_spaces = await asyncio.to_thread(
+                self.repo.search_similar_spaces,
+                campus_id, query_vector, 10, effective_building_id,
+                user_lat, user_lon, radius_m,
+            )
+
+            _WRONG_BLDG_FLOOR = 0.50
+            _WRONG_BLDG_GAP = 0.15
+
+            top_in = similar_spaces[0] if similar_spaces else None
+            in_score = (top_in.get("score") if top_in else 0.0) or 0.0
+            cross_score = 0.0
+            top_cross = None
+
+            if user_building_name and user_building_id:
+                cross_campus = await asyncio.to_thread(
+                    self.repo.search_similar_spaces,
+                    campus_id, query_vector, 3, None,
+                    None, None, None,
+                )
+                top_cross = cross_campus[0] if cross_campus else None
+                cross_score = (top_cross.get("score") if top_cross else 0.0) or 0.0
+
+                if (
+                    cross_score >= _WRONG_BLDG_FLOOR
+                    and cross_score - in_score >= _WRONG_BLDG_GAP
+                    and top_cross
+                    and top_cross.get("building_name")
+                    and top_cross["building_name"] != user_building_name
+                ):
+                    print(
+                        f"[chat] wrong-building: query={user_query!r} "
+                        f"in_score={in_score:.3f} cross_score={cross_score:.3f} "
+                        f"user_building={user_building_name!r} "
+                        f"answer_building={top_cross['building_name']!r}",
+                        flush=True,
+                    )
+                    return {
+                        "answer": (
+                            f"{top_cross['name']} is in "
+                            f"{top_cross['building_name']}, but you're "
+                            f"currently in {user_building_name}. You'll need "
+                            f"to head over to {top_cross['building_name']} "
+                            f"first."
+                        ),
+                        "sources": [
+                            top_cross["name"],
+                            top_cross["building_name"],
+                        ],
+                    }
+
+            print(
+                f"[chat] rag: query={user_query!r} "
+                f"user_building={user_building_name!r} "
+                f"in_results={len(similar_spaces)} "
+                f"in_top_score={in_score:.3f} "
+                f"cross_top_score={cross_score:.3f}",
+                flush=True,
             )
 
             context_lines = []

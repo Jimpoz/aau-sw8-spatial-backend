@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 
 
@@ -9,6 +10,11 @@ class Settings(BaseSettings):
     assistant_mode: str = "offline"
     assistant_online_model_id: str = ""
     assistant_offline_model_id: str = "HuggingFaceTB/SmolLM2-360M-Instruct"
+
+    supabase_db_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("SUPABASE_DB_URL", "SUPABASE_DATABASE_URL"),
+    )
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

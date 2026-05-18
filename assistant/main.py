@@ -3,14 +3,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from db import get_db
+from db_pg import get_pg_db
 from routes import assistant, embed
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db = get_db()
+    pg_db = get_pg_db()
     yield
     db.close()
+    pg_db.close()
 
 
 app = FastAPI(

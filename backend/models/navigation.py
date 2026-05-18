@@ -36,3 +36,4 @@ class Route(BaseModel):
     steps: list[RouteStep]
     floor_changes: list[FloorChange] = []
     building_changes: list[BuildingChange] = []
+    polyline: list[list[float]] = []
