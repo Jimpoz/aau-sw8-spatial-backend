@@ -20,15 +20,20 @@ _CONNECTION_TYPES: set[str] = {
 def _edge_weight(src: dict, dst: dict) -> float:
     """Edge cost in seconds: walking time between centroids plus
     a per-node transition penalty for connection-type targets."""
-    same_frame = (
-        src.get("floor_index") == dst.get("floor_index")
-        and src.get("building_id") == dst.get("building_id")
-        and src.get("centroid_x") is not None
+    have_centroids = (
+        src.get("centroid_x") is not None
         and src.get("centroid_y") is not None
         and dst.get("centroid_x") is not None
         and dst.get("centroid_y") is not None
     )
-    if same_frame:
+    src_fi, dst_fi = src.get("floor_index"), dst.get("floor_index")
+    src_bi, dst_bi = src.get("building_id"), dst.get("building_id")
+    different_frame = (
+        (src_fi is not None and dst_fi is not None and src_fi != dst_fi)
+        or (src_bi is not None and dst_bi is not None and src_bi != dst_bi)
+    )
+
+    if have_centroids and not different_frame:
         dx = float(src["centroid_x"]) - float(dst["centroid_x"])
         dy = float(src["centroid_y"]) - float(dst["centroid_y"])
         dist_m = math.sqrt(dx * dx + dy * dy)
