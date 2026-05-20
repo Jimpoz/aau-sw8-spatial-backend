@@ -503,6 +503,58 @@ class AssistantRepository:
             })
         return results
 
+    def vertical_transport_in_building(
+        self,
+        campus_id: str,
+        building_id: str | None,
+    ) -> list[dict]:
+        """Elevators / staircases / escalators / ramps in a building."""
+        cypher = """
+        MATCH (b:Building)-[:HAS_FLOOR]->(f:Floor)-[:HAS_SPACE]->(s:Space)
+        WHERE s.campus_id = $campus_id
+          AND ($building_id IS NULL OR b.id = $building_id)
+          AND s.space_type IN [
+              'ELEVATOR', 'STAIRCASE', 'ESCALATOR', 'OUTDOOR_STAIRS', 'RAMP'
+          ]
+        RETURN DISTINCT
+            s.display_name AS name,
+            s.space_type   AS type,
+            f.floor_index  AS floor_index,
+            f.display_name AS floor_name
+        ORDER BY
+            CASE s.space_type WHEN 'ELEVATOR' THEN 0 ELSE 1 END,
+            s.display_name
+        """
+        rows = self.db.execute(
+            cypher, {"campus_id": campus_id, "building_id": building_id}
+        )
+        return [dict(r) for r in rows]
+
+    def floor_label_for_index(
+        self,
+        campus_id: str,
+        floor_index: int,
+        building_id: str | None = None,
+    ) -> str | None:
+        """Human floor name (e.g. "1st Floor") for a floor index, taken
+        from the actual Floor node so the answer matches the map."""
+        rows = self.db.execute(
+            """
+            MATCH (b:Building)-[:HAS_FLOOR]->(f:Floor)
+            WHERE f.campus_id = $campus_id
+              AND f.floor_index = $floor_index
+              AND ($building_id IS NULL OR b.id = $building_id)
+            RETURN f.display_name AS name
+            LIMIT 1
+            """,
+            {
+                "campus_id": campus_id,
+                "floor_index": floor_index,
+                "building_id": building_id,
+            },
+        )
+        return rows[0].get("name") if rows else None
+
     def locate_user(
         self,
         campus_id: str,

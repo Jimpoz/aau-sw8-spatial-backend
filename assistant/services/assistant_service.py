@@ -239,6 +239,22 @@ class AssistantService:
             return "general"
         return None
 
+    def _navigation_intent(self, user_query: str) -> bool:
+        """True when the user is asking for a route ("how do I get to X",
+        "directions to X", "take me to X"), as opposed to a listing
+        ("what's on floor 1")."""
+        q = user_query.lower()
+        patterns = [
+            r"\bhow\s+(do|can|would)\s+i\s+(get|go|reach|find|walk|navigate)\b",
+            r"\bhow\s+to\s+(get|go|reach|find|walk|navigate)\b",
+            r"\b(directions?|route|way)\s+to\b",
+            r"\b(take|bring|guide|lead)\s+me\s+to\b",
+            r"\b(get|go|navigate)\s+to\s+the\b",
+            r"\breach\s+the\b",
+            r"\bfind\s+my\s+way\b",
+        ]
+        return any(re.search(p, q) for p in patterns)
+
     def _floor_intent(self, user_query: str) -> int | None:
         """
         Returns the floor_index if the query is asking about a specific floor, else None.
@@ -305,6 +321,70 @@ class AssistantService:
             return extreme, ["ENTRANCE", "ENTRANCE_SECONDARY"]
 
         return extreme, None
+
+    @staticmethod
+    def _ordinal_floor_label(idx: int) -> str:
+        names = {
+            -1: "the basement", 0: "the ground floor", 1: "the first floor",
+            2: "the second floor", 3: "the third floor", 4: "the fourth floor",
+            5: "the fifth floor", 6: "the sixth floor", 7: "the seventh floor",
+            8: "the eighth floor",
+        }
+        return names.get(idx, f"floor {idx}")
+
+    @staticmethod
+    def _transport_phrase(t: dict) -> str:
+        """Natural phrase for a vertical-transport space, avoiding
+        redundancy when the display name already names the type
+        (e.g. "the East Elevator" not "the East Elevator elevator")."""
+        name = t.get("name") or "elevator"
+        low = name.lower()
+        type_word = {
+            "ELEVATOR": "elevator", "ESCALATOR": "escalator", "RAMP": "ramp",
+        }.get(t.get("type"), "staircase")
+        if any(w in low for w in ("elevator", "lift", "stair", "escalator", "ramp")):
+            return f"the {name}"
+        return f"the {name} {type_word}"
+
+    def _floor_change_answer(
+        self,
+        *,
+        campus_id: str,
+        building_id: str,
+        target_floor: int,
+        current_space: str | None,
+    ) -> Dict[str, Any]:
+        """Deterministic floor-change directions grounded in the real graph."""
+        transport = self.repo.vertical_transport_in_building(campus_id, building_id)
+        target_label = (
+            self.repo.floor_label_for_index(campus_id, target_floor, building_id)
+            or self._ordinal_floor_label(target_floor)
+        )
+        start = f"From {current_space}, " if current_space else ""
+
+        if not transport:
+            return {
+                "answer": (
+                    f"I can see {target_label} in this building, but there's no "
+                    f"elevator or staircase mapped here yet, so I can't give you "
+                    f"a step-by-step route to it."
+                ),
+                "sources": [current_space] if current_space else [],
+            }
+
+        elevators = [t for t in transport if t.get("type") == "ELEVATOR"]
+        stairs = [t for t in transport if t.get("type") != "ELEVATOR"]
+        primary = (elevators or stairs)[0]
+        alt = stairs[0] if (elevators and stairs) else None
+
+        answer = f"{start}take {self._transport_phrase(primary)} to {target_label}."
+        if alt is not None:
+            answer += f" You can also use {self._transport_phrase(alt)}."
+
+        sources = [t["name"] for t in transport[:3] if t.get("name")]
+        if current_space:
+            sources = [current_space] + sources
+        return {"answer": answer, "sources": sources}
 
     async def chat(
         self,
@@ -410,9 +490,19 @@ class AssistantService:
                     "sources": [res.get("anchor_name", "Main entrance"), res["target_name"]],
                 }
 
+        nav = self._navigation_intent(user_query)
         floor_idx = self._floor_intent(user_query)
 
-        if floor_idx is not None:
+        if nav and floor_idx is not None and effective_building_id:
+            print(f"[chat] floor-change nav: target={floor_idx} -> grounded answer", flush=True)
+            return self._floor_change_answer(
+                campus_id=campus_id,
+                building_id=effective_building_id,
+                target_floor=floor_idx,
+                current_space=(loc.get("name") if loc else None),
+            )
+
+        if floor_idx is not None and not nav:
             spaces = self.repo.search_spaces_on_floor(
                 campus_id, floor_idx, limit=20, building_id=building_id,
             )

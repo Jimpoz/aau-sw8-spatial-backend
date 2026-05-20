@@ -129,6 +129,8 @@ def _build_dispatch() -> dict[str, Callable[[Any, dict[str, Any]], Any]]:
         "delete_edges_for_space": call("_apply_delete_edges_for_space"),
         "update_connection_group_access": call("_apply_update_connection_group_access"),
         "sync_import": call("_apply_sync_import"),
+        "sync_landmark": call("_apply_sync_landmark"),
+        "delete_landmark": call("_apply_delete_landmark"),
     }
 
 

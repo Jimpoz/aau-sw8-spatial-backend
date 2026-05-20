@@ -24,7 +24,7 @@ Auth & tenancy:
 
 from sqlalchemy import (
     create_engine, Column, String, Float, Integer, DateTime, Boolean, ForeignKey, Enum as SQLEnum,
-    or_, text,
+    Text, or_, text,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -383,6 +383,26 @@ class SpaceConnection(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class Landmark(Base):
+    """User-registered visual landmark anchored to a Space."""
+
+    __tablename__ = "landmarks"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    space_id = Column(String, index=True, nullable=False)
+    floor_id = Column(String, index=True)
+    building_id = Column(String, index=True)
+    campus_id = Column(String, index=True)
+    organization_id = Column(String, ForeignKey("organizations.id"), index=True)
+    image_b64 = Column(Text)
+    image_width = Column(Integer)
+    image_height = Column(Integer)
+    created_by = Column(String, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # --- Service ---
 _shared_engine = None
 _shared_session_local = None
@@ -442,6 +462,14 @@ class PostGISService:
         ("space_connections", "door_cx", "DOUBLE PRECISION"),
         ("space_connections", "door_cy", "DOUBLE PRECISION"),
         ("building_spaces", "embedding", "vector(384)"),
+        ("landmarks", "image_b64", "TEXT"),
+        ("landmarks", "image_width", "INTEGER"),
+        ("landmarks", "image_height", "INTEGER"),
+        ("landmarks", "created_by", "VARCHAR"),
+        ("landmarks", "floor_id", "VARCHAR"),
+        ("landmarks", "building_id", "VARCHAR"),
+        ("landmarks", "campus_id", "VARCHAR"),
+        ("landmarks", "organization_id", "VARCHAR"),
     )
 
     def _ensure_columns(self) -> None:
@@ -469,7 +497,7 @@ class PostGISService:
 
     # --- row-level security ---
     _RLS_PUBLIC_READ_TABLES = ("campuses", "buildings", "floors")
-    _RLS_TABLES = ("campuses", "buildings", "floors", "imports")
+    _RLS_TABLES = ("campuses", "buildings", "floors", "imports", "landmarks")
 
     def apply_rls_policies(self) -> bool:
         """Enable RLS + install per-tenant policies on org-scoped tables.
@@ -1018,6 +1046,73 @@ class PostGISService:
     # Backwards-compatible alias (ImportService still calls this name).
     def sync_floor_plan(self, floor_data: dict) -> bool:
         return self.sync_floor(floor_data)
+
+    # --- landmarks ---
+
+    def sync_landmark(self, landmark_data: dict) -> bool:
+        """Mirror a Neo4j Landmark write into PostGIS."""
+        from services.sync_outbox import enqueue
+        return enqueue("sync_landmark", {"landmark_data": landmark_data})
+
+    def _apply_sync_landmark(self, landmark_data: dict) -> None:
+        session = self._open_session()
+        if session is None:
+            return
+
+        record = session.query(Landmark).filter_by(id=landmark_data["id"]).first()
+        if record:
+            record.name            = landmark_data.get("name", record.name)
+            record.space_id        = landmark_data.get("space_id", record.space_id)
+            record.floor_id        = landmark_data.get("floor_id", record.floor_id)
+            record.building_id     = landmark_data.get("building_id", record.building_id)
+            record.campus_id       = landmark_data.get("campus_id", record.campus_id)
+            record.organization_id = landmark_data.get("organization_id", record.organization_id)
+            if landmark_data.get("image_b64"):
+                record.image_b64 = landmark_data["image_b64"]
+            record.image_width     = landmark_data.get("image_width", record.image_width)
+            record.image_height    = landmark_data.get("image_height", record.image_height)
+            record.updated_at      = datetime.utcnow()
+        else:
+            record = Landmark(
+                id=landmark_data["id"],
+                name=landmark_data.get("name", ""),
+                space_id=landmark_data["space_id"],
+                floor_id=landmark_data.get("floor_id"),
+                building_id=landmark_data.get("building_id"),
+                campus_id=landmark_data.get("campus_id"),
+                organization_id=landmark_data.get("organization_id"),
+                image_b64=landmark_data.get("image_b64"),
+                image_width=landmark_data.get("image_width"),
+                image_height=landmark_data.get("image_height"),
+                created_by=landmark_data.get("created_by"),
+            )
+            if landmark_data.get("created_at"):
+                try:
+                    iso = landmark_data["created_at"]
+                    # Tolerate trailing Z by swapping to +00:00.
+                    if isinstance(iso, str) and iso.endswith("Z"):
+                        iso = iso[:-1] + "+00:00"
+                    record.created_at = datetime.fromisoformat(iso) if isinstance(iso, str) else iso
+                except (TypeError, ValueError):
+                    pass
+            session.add(record)
+
+        session.commit()
+        session.close()
+
+    def delete_landmark(self, landmark_id: str) -> bool:
+        from services.sync_outbox import enqueue
+        return enqueue("delete_landmark", {"landmark_id": landmark_id})
+
+    def _apply_delete_landmark(self, landmark_id: str) -> None:
+        session = self._open_session()
+        if session is None:
+            return
+        record = session.query(Landmark).filter_by(id=landmark_id).first()
+        if record:
+            session.delete(record)
+            session.commit()
+        session.close()
 
     # --- deletes ---
 

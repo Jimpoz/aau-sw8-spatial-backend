@@ -123,6 +123,7 @@ services:
       - NEO4J_URI=${NEO4J_URI}
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - SUPABASE_DB_URL=${SUPABASE_DB_URL}
 
   email:
     build:
