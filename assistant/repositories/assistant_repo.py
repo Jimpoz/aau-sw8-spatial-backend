@@ -562,11 +562,10 @@ class AssistantRepository:
         lon: float,
         building_radius_m: float = 1500.0,
     ) -> dict | None:
-        
+
         rows = self.db.execute(
             """
             MATCH (b:Building)
-            WHERE b.campus_id = $campus_id OR b.id = $campus_id
             OPTIONAL MATCH (b)-[:HAS_FLOOR]->(f:Floor)-[:HAS_SPACE]->(s:Space)
             RETURN
               b.id AS building_id,
@@ -609,8 +608,6 @@ class AssistantRepository:
                 continue
 
             b_distance = _haversine_m(lat, lon, origin_lat, origin_lng)
-            if b_distance > building_radius_m:
-                continue
 
             s_lat, s_lng = _project_local_to_global(
                 cx, cy, origin_lat, origin_lng, bearing, scale,
@@ -626,6 +623,9 @@ class AssistantRepository:
                     "building_name": r["building_name"],
                     "building_id": r.get("building_id"),
                 }
+
+            if b_distance > building_radius_m:
+                continue
 
             poly_raw = r["polygon"]
             if not poly_raw:

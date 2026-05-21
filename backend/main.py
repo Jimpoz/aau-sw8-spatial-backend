@@ -24,6 +24,8 @@ from routes import (
     search,
     auth,
     landmarks,
+    positioning,
+    activity,
 )
 from scripts.init_db import apply_schema
 from services.gds_service import GdsService
@@ -116,6 +118,8 @@ app.include_router(floors.router, prefix=PREFIX)
 app.include_router(spaces.router, prefix=PREFIX)
 app.include_router(connections.router, prefix=PREFIX)
 app.include_router(landmarks.router, prefix=PREFIX)
+app.include_router(positioning.router, prefix=PREFIX)
+app.include_router(activity.router, prefix=PREFIX)
 app.include_router(navigation.router, prefix=PREFIX)
 app.include_router(search.router, prefix=PREFIX)
 app.include_router(admin_routes.router, prefix=PREFIX)

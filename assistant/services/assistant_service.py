@@ -203,6 +203,43 @@ class AssistantService:
         _embed_cache_put(text, vec)
         return vec
 
+    def _smalltalk_reply(self, user_query: str) -> str | None:
+        """Return a canned reply for greetings / thanks / trivial chit-chat, else None."""
+        q = user_query.lower().strip().strip("!.?,")
+        if not q:
+            return None
+        greetings = {
+            "hi", "hey", "hello", "yo", "hiya", "howdy", "heya",
+            "hey there", "hello there", "hi there", "good morning",
+            "good afternoon", "good evening", "greetings", "sup",
+            "what's up", "whats up", "wassup",
+        }
+        thanks = {
+            "thanks", "thank you", "thx", "ty", "cheers",
+            "thank you so much", "thanks a lot", "appreciate it",
+        }
+        farewells = {"bye", "goodbye", "see you", "see ya", "later", "cya"}
+        how_are_you = {
+            "how are you", "how are you doing", "how's it going",
+            "hows it going", "how do you do",
+        }
+        if q in greetings:
+            return (
+                "Hi! I'm your campus assistant. I can help you find rooms, "
+                "give directions, or tell you what's on a floor. What are you "
+                "looking for?"
+            )
+        if q in thanks:
+            return "You're welcome! Anything else I can help you find?"
+        if q in farewells:
+            return "Goodbye! Find me here whenever you need directions."
+        if q in how_are_you:
+            return (
+                "Doing great, thanks! I'm ready to help you navigate the "
+                "campus — which room or place are you after?"
+            )
+        return None
+
     def _where_am_i_intent(self, user_query: str) -> str | None:
         """Return one of 'campus' | 'building' | 'general' for the
         respective "where am I"-style questions, or None when nothing
@@ -401,6 +438,11 @@ class AssistantService:
             f"ios_building={building_id!r} gps=({user_lat}, {user_lon})",
             flush=True,
         )
+
+        smalltalk = self._smalltalk_reply(user_query)
+        if smalltalk is not None:
+            print("[chat] smalltalk → canned reply", flush=True)
+            return {"answer": smalltalk, "sources": []}
 
         loc = None
         if user_lat is not None and user_lon is not None:

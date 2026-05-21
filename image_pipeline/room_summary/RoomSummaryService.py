@@ -70,8 +70,25 @@ class RoomSummaryService:
         self.class_config_path = self._detector.class_config_path
         self.confidence_threshold = self._detector.confidence_threshold
 
-    def list_room_names(self, conn: Any) -> list[str]:
-        return self._room_summary_repository(conn).list_room_names()
+    def warm_up(self) -> None:
+        """Force the YOLO, OCR and embedding models to load by running a tiny
+        dummy frame through them once. Called at startup so the first real
+        upload doesn't pay the (large, CPU-only) cold-load cost and time out."""
+        import numpy as np
+
+        dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+        for step in (
+            lambda: self._detector.detect_counts(dummy),
+            lambda: self._text_detector.detect_text(dummy),
+            lambda: self._embedder.embed_batch([dummy]) if self._embedder else None,
+        ):
+            try:
+                step()
+            except Exception:
+                pass
+
+    def list_room_names(self, conn: Any, building_id: str | None = None) -> list[str]:
+        return self._room_summary_repository(conn).list_room_names(building_id=building_id)
 
     def summarize_images(
         self,

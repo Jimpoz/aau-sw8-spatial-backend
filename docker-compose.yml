@@ -106,6 +106,7 @@ services:
       - NEO4J_URI=${NEO4J_URI}
       - NEO4J_USER=${NEO4J_USER}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
+      - HF_TOKEN=${HF_TOKEN}
     volumes:
       - ./image_pipeline:/app
       - ./shared:/app/shared
@@ -146,6 +147,21 @@ services:
       # Dummy-mode mailbox: captured .eml files land here. Created on
       # demand; safe to leave mounted whether or not MAILBOX_DIR is set.
       - ./email-mailbox:/mailbox
+
+  # Local mail catcher for development: captures everything the email
+  # service sends (plain SMTP on 1025) and shows it in a web inbox at
+  # http://localhost:8025 — no real account, no mail leaving the machine.
+  # To route mail here, set in .env:
+  #   SMTP_HOST=mailpit
+  #   SMTP_PORT=1025
+  #   SMTP_USE_TLS=false
+  #   SMTP_USE_SSL=false
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
+    expose:
+      - "1025"
 
   frontend:
     build:

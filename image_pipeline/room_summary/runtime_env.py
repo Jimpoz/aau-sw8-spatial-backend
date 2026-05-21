@@ -35,3 +35,14 @@ def configure_runtime_env() -> None:
     os.environ.setdefault("TORCH_HOME", str(torch_dir))
     os.environ.setdefault("HF_HOME", str(hf_dir))
     os.environ.setdefault("OPEN_CLIP_CACHE", str(clip_dir))
+
+    token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+    if token:
+        os.environ.setdefault("HF_TOKEN", token)
+        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
+        try:
+            from huggingface_hub import login
+
+            login(token=token, add_to_git_credential=False)
+        except Exception:
+            pass

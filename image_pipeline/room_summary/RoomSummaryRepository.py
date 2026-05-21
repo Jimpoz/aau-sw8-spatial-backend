@@ -30,16 +30,28 @@ class RoomSummaryRepository:
 
         return parsed if isinstance(parsed, dict) else {}
 
-    def list_room_names(self) -> list[str]:
-        rows = self._query_runner.run(
-            """
-            MATCH (space:Space)
-            WHERE space.space_type IN $room_space_types
-            RETURN coalesce(space.display_name, space.short_name, toString(space.id)) AS name
-            ORDER BY name
-            """,
-            room_space_types=list(self._ROOM_SPACE_TYPES),
-        )
+    def list_room_names(self, building_id: str | None = None) -> list[str]:
+        if building_id:
+            rows = self._query_runner.run(
+                """
+                MATCH (b:Building {id: $building_id})-[:HAS_FLOOR]->(:Floor)-[:HAS_SPACE]->(space:Space)
+                WHERE space.space_type IN $room_space_types
+                RETURN coalesce(space.display_name, space.short_name, toString(space.id)) AS name
+                ORDER BY name
+                """,
+                building_id=building_id,
+                room_space_types=list(self._ROOM_SPACE_TYPES),
+            )
+        else:
+            rows = self._query_runner.run(
+                """
+                MATCH (space:Space)
+                WHERE space.space_type IN $room_space_types
+                RETURN coalesce(space.display_name, space.short_name, toString(space.id)) AS name
+                ORDER BY name
+                """,
+                room_space_types=list(self._ROOM_SPACE_TYPES),
+            )
         return sorted({str(row["name"]) for row in rows if row["name"] is not None})
 
     def replace_room_detection_setup(

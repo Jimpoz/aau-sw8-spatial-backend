@@ -403,6 +403,63 @@ class Landmark(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class WifiFingerprint(Base):
+    """A Wi-Fi RSSI (+ optional RTT) fingerprint sample captured while
+    standing in a Space. Used for indoor positioning via kNN. PostGIS-only
+    (not mirrored to Neo4j) — it's bulk numeric data, not a graph entity."""
+
+    __tablename__ = "wifi_fingerprints"
+
+    id = Column(String, primary_key=True)
+    space_id = Column(String, index=True, nullable=False)
+    floor_id = Column(String, index=True)
+    building_id = Column(String, index=True)
+    campus_id = Column(String, index=True)
+    organization_id = Column(String, ForeignKey("organizations.id"), index=True)
+    # bssid -> rssi in dBm (negative ints).
+    readings = Column(JSONB, nullable=False)
+    # bssid -> distance in mm from 802.11mc FTM ranging, when available.
+    rtt_distances_mm = Column(JSONB)
+    sample_count = Column(Integer, default=1)
+    created_by = Column(String, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class WifiAccessPoint(Base):
+    """A known Wi-Fi access point. Its on-floor position (x,y) is reserved
+    for RTT trilateration and stays null until surveyed; supports_rtt flags
+    whether the AP answers 802.11mc FTM ranging."""
+
+    __tablename__ = "wifi_access_points"
+
+    bssid = Column(String, primary_key=True)
+    ssid = Column(String)
+    floor_id = Column(String, index=True)
+    building_id = Column(String, index=True)
+    campus_id = Column(String, index=True)
+    organization_id = Column(String, ForeignKey("organizations.id"), index=True)
+    x = Column(Float)
+    y = Column(Float)
+    supports_rtt = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserDailyActivity(Base):
+    """Per-user, per-day walking totals. Keyed by the client's local date
+    (``day_date`` as YYYY-MM-DD) so the daily reset happens at the user's
+    local midnight with no scheduled job: a new day simply has no row yet and
+    reads as zero."""
+
+    __tablename__ = "user_daily_activity"
+
+    user_id = Column(String, ForeignKey("app_users.id", ondelete="CASCADE"), primary_key=True)
+    day_date = Column(String, primary_key=True)
+    distance_m = Column(Float, default=0.0, nullable=False)
+    steps = Column(Integer, default=0, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # --- Service ---
 _shared_engine = None
 _shared_session_local = None
@@ -497,24 +554,13 @@ class PostGISService:
 
     # --- row-level security ---
     _RLS_PUBLIC_READ_TABLES = ("campuses", "buildings", "floors")
-    _RLS_TABLES = ("campuses", "buildings", "floors", "imports", "landmarks")
+    _RLS_TABLES = (
+        "campuses", "buildings", "floors", "imports", "landmarks",
+        "wifi_fingerprints", "wifi_access_points",
+    )
 
     def apply_rls_policies(self) -> bool:
-        """Enable RLS + install per-tenant policies on org-scoped tables.
-
-        Idempotent: drops the policy by name and recreates it, so schema
-        churn (renames, additional tables) is picked up on the next cold
-        start. The policy admits a row when EITHER the connecting session
-        is acting as a service (``app.is_service = 'true'``) OR the row's
-        ``organization_id`` matches ``app.org_id``. For tables that opt in
-        via ``_RLS_PUBLIC_READ_TABLES`` the USING clause additionally admits
-        ``is_public = true`` so personal-account users (no org context) can
-        read public places like malls or airports. WITH CHECK stays strict
-        so anonymous users can't create or edit public rows.
-
-        The ``true`` argument to ``current_setting`` makes the GUC missing
-        case return NULL instead of raising, so untagged sessions simply
-        fail the policy rather than crashing the query."""
+        """Enable RLS + install per-tenant policies on org-scoped tables."""
         if not self.engine:
             return False
         try:
@@ -557,6 +603,190 @@ class PostGISService:
         if org_id:
             session.execute(text("SET LOCAL app.org_id = :org_id"), {"org_id": org_id})
         return session
+
+
+    def insert_wifi_fingerprint(
+        self,
+        *,
+        fp_id: str,
+        space_id: str,
+        floor_id: str | None,
+        building_id: str | None,
+        campus_id: str | None,
+        organization_id: str | None,
+        readings: dict,
+        rtt_distances_mm: dict | None = None,
+        sample_count: int = 1,
+        created_by: str | None = None,
+    ) -> bool:
+        session = self._open_session()
+        if session is None:
+            return False
+        try:
+            session.add(WifiFingerprint(
+                id=fp_id,
+                space_id=space_id,
+                floor_id=floor_id,
+                building_id=building_id,
+                campus_id=campus_id,
+                organization_id=organization_id,
+                readings=readings,
+                rtt_distances_mm=rtt_distances_mm,
+                sample_count=sample_count or 1,
+                created_by=created_by,
+            ))
+            session.commit()
+            return True
+        finally:
+            session.close()
+
+    def wifi_fingerprints_for_floor(self, floor_id: str) -> list[dict]:
+        """All fingerprints on a floor (RLS-scoped to the caller's org)."""
+        session = self._open_session()
+        if session is None:
+            return []
+        try:
+            rows = session.query(WifiFingerprint).filter(
+                WifiFingerprint.floor_id == floor_id
+            ).all()
+            return [
+                {
+                    "space_id": r.space_id,
+                    "readings": r.readings or {},
+                    "rtt_distances_mm": r.rtt_distances_mm or {},
+                }
+                for r in rows
+            ]
+        finally:
+            session.close()
+
+    def wifi_fingerprint_counts_for_floor(self, floor_id: str) -> dict:
+        """space_id -> number of stored fingerprints (for survey progress)."""
+        session = self._open_session()
+        if session is None:
+            return {}
+        try:
+            rows = session.query(WifiFingerprint.space_id).filter(
+                WifiFingerprint.floor_id == floor_id
+            ).all()
+            counts: dict = {}
+            for (space_id,) in rows:
+                counts[space_id] = counts.get(space_id, 0) + 1
+            return counts
+        finally:
+            session.close()
+
+    def upsert_wifi_access_point(
+        self,
+        *,
+        bssid: str,
+        ssid: str | None,
+        floor_id: str | None,
+        building_id: str | None,
+        campus_id: str | None,
+        organization_id: str | None,
+        x: float | None = None,
+        y: float | None = None,
+        supports_rtt: bool = False,
+    ) -> bool:
+        session = self._open_session()
+        if session is None:
+            return False
+        try:
+            rec = session.query(WifiAccessPoint).filter_by(bssid=bssid).first()
+            if rec:
+                rec.ssid = ssid if ssid is not None else rec.ssid
+                rec.floor_id = floor_id or rec.floor_id
+                rec.building_id = building_id or rec.building_id
+                rec.campus_id = campus_id or rec.campus_id
+                rec.organization_id = organization_id or rec.organization_id
+                if x is not None:
+                    rec.x = x
+                if y is not None:
+                    rec.y = y
+                rec.supports_rtt = supports_rtt
+                rec.updated_at = datetime.utcnow()
+            else:
+                session.add(WifiAccessPoint(
+                    bssid=bssid,
+                    ssid=ssid,
+                    floor_id=floor_id,
+                    building_id=building_id,
+                    campus_id=campus_id,
+                    organization_id=organization_id,
+                    x=x,
+                    y=y,
+                    supports_rtt=supports_rtt,
+                ))
+            session.commit()
+            return True
+        finally:
+            session.close()
+
+    def wifi_access_points_for_floor(self, floor_id: str) -> list[dict]:
+        session = self._open_session()
+        if session is None:
+            return []
+        try:
+            rows = session.query(WifiAccessPoint).filter(
+                WifiAccessPoint.floor_id == floor_id
+            ).all()
+            return [
+                {
+                    "bssid": r.bssid,
+                    "ssid": r.ssid,
+                    "x": r.x,
+                    "y": r.y,
+                    "supports_rtt": bool(r.supports_rtt),
+                }
+                for r in rows
+            ]
+        finally:
+            session.close()
+
+    # --- daily activity (distance + steps) ---
+
+    def get_daily_activity(self, user_id: str, day: str) -> dict:
+        session = self._open_session()
+        if session is None:
+            return {"distance_m": 0.0, "steps": 0}
+        try:
+            rec = session.query(UserDailyActivity).filter_by(
+                user_id=user_id, day_date=day
+            ).first()
+            if rec is None:
+                return {"distance_m": 0.0, "steps": 0}
+            return {"distance_m": float(rec.distance_m or 0.0), "steps": int(rec.steps or 0)}
+        finally:
+            session.close()
+
+    def add_daily_activity(
+        self, user_id: str, day: str, distance_m: float, steps: int
+    ) -> dict:
+        """Increment today's totals (upsert). Returns the new totals."""
+        session = self._open_session()
+        if session is None:
+            return {"distance_m": 0.0, "steps": 0}
+        try:
+            rec = session.query(UserDailyActivity).filter_by(
+                user_id=user_id, day_date=day
+            ).first()
+            if rec is None:
+                rec = UserDailyActivity(
+                    user_id=user_id,
+                    day_date=day,
+                    distance_m=max(0.0, distance_m),
+                    steps=max(0, steps),
+                )
+                session.add(rec)
+            else:
+                rec.distance_m = float(rec.distance_m or 0.0) + max(0.0, distance_m)
+                rec.steps = int(rec.steps or 0) + max(0, steps)
+                rec.updated_at = datetime.utcnow()
+            session.commit()
+            return {"distance_m": float(rec.distance_m or 0.0), "steps": int(rec.steps or 0)}
+        finally:
+            session.close()
 
     # --- organizations ---
 

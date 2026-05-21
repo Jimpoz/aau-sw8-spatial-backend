@@ -17,6 +17,21 @@ AUTH_JWT_SECRET = os.getenv("AUTH_JWT_SECRET", "")
 AUTH_JWT_ISSUER = os.getenv("AUTH_JWT_ISSUER", "ariadne-backend")
 _IDENTITY_HEADERS = ("x-user-id", "x-org-id", "x-org-ids", "x-user-role")
 
+_STRIP_RESPONSE_HEADERS = frozenset({
+    "date", "server", "content-length",
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+})
+
+
+def _relay_headers(upstream_headers: Any, upstream_name: str) -> dict[str, str]:
+    out = {
+        k: v for k, v in upstream_headers.items()
+        if k.lower() not in _STRIP_RESPONSE_HEADERS
+    }
+    out["X-Gateway-Upstream"] = upstream_name
+    return out
+
 
 def _env_flag(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
@@ -192,13 +207,10 @@ async def _proxy(request: Request, target_base: str, upstream_name: str) -> Resp
             headers={"Content-Type": "application/json"},
         )
 
-    response_headers = dict(resp.headers)
-    response_headers["X-Gateway-Upstream"] = upstream_name
-
     return Response(
         content=resp.content,
         status_code=resp.status_code,
-        headers=response_headers,
+        headers=_relay_headers(resp.headers, upstream_name),
     )
 
 
@@ -388,12 +400,10 @@ async def proxy_ml_vision(request: Request, path: str):
             headers={"Content-Type": "application/json"},
         )
 
-    response_headers = dict(resp.headers)
-    response_headers["X-Gateway-Upstream"] = "ml_vision"
     return Response(
         content=resp.content,
         status_code=resp.status_code,
-        headers=response_headers,
+        headers=_relay_headers(resp.headers, "ml_vision"),
     )
 
 

@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -14,6 +15,21 @@ from room_summary.RoomSummaryService import RoomSummaryService
 ROOM_SUMMARY_DIR = Path(__file__).resolve().parent / "room_summary"
 PREFIX = "/api/v1"
 CLOCKWISE_DIRECTIONS = ("north", "east", "south", "west")
+
+_MAX_INFERENCE_DIM = int(os.getenv("MAX_INFERENCE_DIM", "1600"))
+
+
+def _downscale_for_inference(frame: np.ndarray) -> np.ndarray:
+    height, width = frame.shape[:2]
+    longest = max(height, width)
+    if longest <= _MAX_INFERENCE_DIM:
+        return frame
+    scale = _MAX_INFERENCE_DIM / float(longest)
+    return cv2.resize(
+        frame,
+        (max(1, int(width * scale)), max(1, int(height * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
 
 
 def _require_org_uploader(
@@ -110,6 +126,7 @@ async def _decode_upload_images(images: list[UploadFile]) -> list[RoomImageInput
             raise ValueError(
                 f"Uploaded file {image.filename or f'image_{image_index}'} is not a valid image."
             )
+        frame = _downscale_for_inference(frame)
 
         decoded_images.append(
             RoomImageInput(
@@ -175,11 +192,12 @@ async def _run_named_room_summary(
             await image.close()
 
 
-def _get_room_names() -> dict[str, list[str]]:
+def _get_room_names(building_id: str | None = None) -> dict[str, list[str]]:
     try:
         return {
             "names": get_room_summary_service().list_room_names(
                 conn=get_neo4j_driver(),
+                building_id=building_id,
             )
         }
     except Exception as exc:
@@ -198,18 +216,19 @@ async def _run_room_object_detection_setup(
 ) -> dict[str, object]:
     try:
         decoded_images = await _decode_upload_images(images)
-        return get_room_summary_service(
-            model_name,
-            confidence_threshold,
-        ).setup_room_object_detection(
-            room_name=room_name,
-            images=decoded_images,
-            conn=get_neo4j_driver(),
-            stored_image_count=stored_image_count,
-            stored_views=stored_views,
-            uploaded_by_user_id=uploaded_by_user_id,
-            uploaded_by_org_id=uploaded_by_org_id,
-        ).to_dict()
+        service = get_room_summary_service(model_name, confidence_threshold)
+        result = await asyncio.to_thread(
+            lambda: service.setup_room_object_detection(
+                room_name=room_name,
+                images=decoded_images,
+                conn=get_neo4j_driver(),
+                stored_image_count=stored_image_count,
+                stored_views=stored_views,
+                uploaded_by_user_id=uploaded_by_user_id,
+                uploaded_by_org_id=uploaded_by_org_id,
+            )
+        )
+        return result.to_dict()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -229,6 +248,11 @@ async def _run_room_object_detection_setup(
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     get_neo4j_driver()
+    try:
+        await asyncio.to_thread(lambda: get_room_summary_service().warm_up())
+        print("[startup] room-summary models warmed up", flush=True)
+    except Exception as exc:  # pragma: no cover - best effort
+        print(f"[startup] model warm-up failed: {exc}", flush=True)
     yield
     close_neo4j()
 
@@ -251,8 +275,12 @@ def health() -> dict[str, str]:
 
 
 @app.get(f"{PREFIX}/room-summary/rooms")
-def get_room_names() -> dict[str, list[str]]:
-    return _get_room_names()
+def get_room_names(
+    building_id: str | None = Query(
+        None, description="Restrict to rooms in this building (the user's current building)."
+    )
+) -> dict[str, list[str]]:
+    return _get_room_names(building_id)
 
 
 @app.get(f"{PREFIX}/room-summary/similarity")
