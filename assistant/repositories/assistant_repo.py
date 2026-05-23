@@ -134,25 +134,45 @@ class AssistantRepository:
                 ") "
             )
 
+        conn_sql = ("('DOOR_STANDARD','DOOR_AUTOMATIC','DOOR_LOCKED',"
+                    "'DOOR_EMERGENCY','PASSAGE','STAIRCASE','ELEVATOR',"
+                    "'ESCALATOR','RAMP','CONNECTOR')")
+
         sql = text(f"""
             SELECT
                 bs.display_name                        AS name,
                 bs.space_type                          AS type,
                 f.display_name                         AS floor_name,
+                bs.floor_index                         AS floor_index,
                 b.name                                 AS building_name,
                 1.0 - (bs.embedding <=> CAST(:q AS vector)) AS score,
-                COALESCE(
-                    (SELECT json_agg(json_build_object(
-                        'name', nb.display_name,
-                        'connection_type', sc.connection_type
-                    ))
-                     FROM space_connections sc
-                     JOIN building_spaces nb ON nb.id = sc.to_space_id
-                     WHERE sc.from_space_id = bs.id),
-                    '[]'::json
-                )                                      AS connected_to
+                COALESCE((
+                    SELECT json_agg(DISTINCT label) FROM (
+                        SELECT nb.display_name AS label
+                        FROM space_connections sc
+                        JOIN building_spaces nb ON nb.id = sc.to_space_id
+                        WHERE sc.from_space_id = bs.id
+                          AND nb.display_name IS NOT NULL
+                          AND nb.space_type NOT IN {conn_sql}
+                        UNION
+                        SELECT nb2.display_name AS label
+                        FROM space_connections sc1
+                        JOIN building_spaces mid ON mid.id = sc1.to_space_id
+                        JOIN space_connections sc2 ON sc2.from_space_id = mid.id
+                        JOIN building_spaces nb2 ON nb2.id = sc2.to_space_id
+                        WHERE sc1.from_space_id = bs.id
+                          AND mid.space_type IN {conn_sql}
+                          AND nb2.id <> bs.id
+                          AND nb2.display_name IS NOT NULL
+                          AND nb2.space_type NOT IN {conn_sql}
+                    ) neigh
+                ), '[]'::json)                         AS connected_to
             FROM building_spaces bs
-            LEFT JOIN floors    f ON f.id = bs.floor_id
+            -- floors.id is a composite of building and floor ids; the bare
+            -- floor id lives in floors.floor_id, so join on that (scoped to
+            -- the building to avoid cross-building floor_id collisions).
+            LEFT JOIN floors    f ON f.floor_id = bs.floor_id
+                                 AND f.building_id = bs.building_id
             LEFT JOIN buildings b ON b.id = bs.building_id
             WHERE bs.campus_id    = :campus_id
               AND bs.is_navigable = TRUE
@@ -191,6 +211,7 @@ class AssistantRepository:
                 "name": r["name"],
                 "type": r["type"],
                 "floor_name": r["floor_name"],
+                "floor_index": r["floor_index"],
                 "building_name": r["building_name"],
                 "connected_to": conns,
                 "score": float(r["score"]) if r["score"] is not None else None,
@@ -214,17 +235,22 @@ class AssistantRepository:
         MATCH (building:Building)-[:HAS_FLOOR]->(floor:Floor)-[:HAS_SPACE]->(space)
         WHERE $building_id IS NULL OR building.id = $building_id
 
-        OPTIONAL MATCH (space)-[r:CONNECTS_TO]-(neighbor:Space)
+        // Reach real rooms/corridors up to two hops away, hopping through
+        // connector nodes (doors, stairs, ...) but never naming them.
+        OPTIONAL MATCH (space)-[:CONNECTS_TO*1..2]-(neighbor:Space)
+        WHERE neighbor <> space
+          AND NOT neighbor.space_type IN [
+            'DOOR_STANDARD','DOOR_AUTOMATIC','DOOR_LOCKED','DOOR_EMERGENCY',
+            'PASSAGE','STAIRCASE','ELEVATOR','ESCALATOR','RAMP','CONNECTOR'
+          ]
 
         RETURN
             space.display_name AS name,
             space.space_type AS type,
             floor.display_name AS floor_name,
+            floor.floor_index AS floor_index,
             building.name AS building_name,
-            collect(CASE WHEN neighbor IS NOT NULL THEN {
-                name: neighbor.display_name,
-                connection_type: type(r)
-            } ELSE null END) AS connected_to,
+            collect(DISTINCT neighbor.display_name) AS connected_to,
             score
         ORDER BY score DESC
         """
@@ -241,11 +267,12 @@ class AssistantRepository:
 
         results = []
         for record in records:
-            connections = [c for c in record["connected_to"] if c is not None]
+            connections = [c for c in record["connected_to"] if c]
             results.append({
                 "name": record["name"],
                 "type": record["type"],
                 "floor_name": record["floor_name"],
+                "floor_index": record["floor_index"],
                 "building_name": record["building_name"],
                 "connected_to": connections,
                 "score": record["score"],
@@ -554,6 +581,38 @@ class AssistantRepository:
             },
         )
         return rows[0].get("name") if rows else None
+
+    def list_building_floors(
+        self,
+        campus_id: str,
+        building_id: str | None = None,
+    ) -> list[dict]:
+        """Every floor of a building, ordered by index - for structure
+        questions such as "how many floors are there"."""
+        # Scope by building id when we have it (unique, and Floor nodes don't
+        # reliably carry campus_id); only fall back to the campus filter on the
+        # Building when no building id is supplied.
+        rows = self.db.execute(
+            """
+            MATCH (b:Building)-[:HAS_FLOOR]->(f:Floor)
+            WHERE ($building_id IS NULL OR b.id = $building_id)
+              AND ($building_id IS NOT NULL OR b.campus_id = $campus_id)
+            RETURN DISTINCT
+              f.floor_index  AS floor_index,
+              f.display_name AS floor_name,
+              b.name         AS building_name
+            ORDER BY floor_index
+            """,
+            {"campus_id": campus_id, "building_id": building_id},
+        )
+        return [
+            {
+                "floor_index": r.get("floor_index"),
+                "floor_name": r.get("floor_name"),
+                "building_name": r.get("building_name"),
+            }
+            for r in rows
+        ]
 
     def locate_user(
         self,

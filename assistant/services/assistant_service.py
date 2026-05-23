@@ -134,6 +134,23 @@ def _truncate_context(tokenizer: AutoTokenizer, prefix: str, question: str, max_
             break
     return "\n".join(kept), question
 
+# Minumum confidence threshold
+_FIND_PLACE_MIN_SCORE = 0.30
+
+
+def _floor_label(floor_name, floor_index) -> str:
+    """Human floor description. Prefers the floor's display name, else derives
+    one from the index (so a null name no longer renders as "located on None")."""
+    if floor_name:
+        return str(floor_name)
+    if floor_index is None:
+        return "an unspecified floor"
+    if floor_index == 0:
+        return "the ground floor (floor 0)"
+    if floor_index < 0:
+        return f"basement level {abs(int(floor_index))}"
+    return f"floor {int(floor_index)}"
+
 def clean_response(text: str) -> str:
     """Prevents the LLM to return unnecessary reasoning in the output"""
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
@@ -318,6 +335,45 @@ class AssistantService:
 
         return None
 
+    def _floor_count_intent(self, user_query: str) -> bool:
+        """True for "how many floors/levels/storeys" structure questions.
+        Checked before the where-am-i intent because "...in this building"
+        otherwise wrongly triggers the "which building am I in" answer."""
+        q = user_query.lower()
+        return bool(
+            re.search(r"\bhow\s+many\s+(floors?|levels?|stor(?:e?ys?|ies))\b", q)
+            or re.search(r"\bnumber\s+of\s+(floors?|levels?|stor(?:e?ys?|ies))\b", q)
+            or re.search(r"\b(floors?|levels?|stor(?:e?ys?|ies))\s+(does|do|are|is)\b.*\bbuilding\b", q)
+        )
+
+    def _find_place_intent(self, user_query: str) -> bool:
+        """True for locate-a-place questions, answered deterministically from
+        the top match so the floor is taken straight from the map data instead
+        of being (mis)phrased — or invented — by the small LLM. Covers
+        "where is X", "is there a X", "do you have a X", "which floor is X on"."""
+        q = user_query.lower()
+        # Exclude self-location ("which floor am I on"), handled separately.
+        if self._which_floor_intent(q):
+            return False
+        return bool(
+            re.search(r"\bwhere(\s+is|\s+are|'?s|\s+can\s+i\s+find)\b", q)
+            or re.search(r"\blocation\s+of\b", q)
+            or re.search(r"\b(is|are)\s+there\s+(a|an|any)\b", q)
+            or re.search(r"\b(do|does)\s+\w+.*\bhave\s+(a|an|any)\b", q)
+            or re.search(r"\b(which|what)\s+floor\s+is\b", q)
+        )
+
+    def _which_floor_intent(self, user_query: str) -> bool:
+        """True for "which floor am I on" self-location questions (distinct
+        from "which floor is the toilet on", which is a find-place query)."""
+        q = user_query.lower()
+        return bool(
+            re.search(r"\b(which|what)\s+floor\b.*\b(am\s+i|i'?m|i\s+am)\b", q)
+            or re.search(r"\b(am\s+i|i'?m|i\s+am)\b.*\b(which|what)\s+floor\b", q)
+            or re.search(r"\b(what|which)\s+floor\s+is\s+this\b", q)
+            or re.search(r"\bmy\s+(current\s+)?floor\b", q)
+        )
+
     # Depending on the question search all the spaces or only subset of spaces
     def _needs_global_map(self, user_query: str) -> bool:
         q = user_query.lower().strip()
@@ -430,6 +486,7 @@ class AssistantService:
         building_id: str | None = None,
         user_lat: float | None = None,
         user_lon: float | None = None,
+        floor_index: int | None = None,
     ) -> Dict[str, Any]:
         t0 = time.perf_counter()
 
@@ -459,6 +516,56 @@ class AssistantService:
         )
 
         effective_building_id = user_building_id or building_id
+
+        # Building-structure questions ("how many floors?") are answered
+        # deterministically from the graph. Checked BEFORE the where-am-i
+        # intent, whose "...this building" pattern would otherwise hijack them.
+        if self._floor_count_intent(user_query):
+            if not effective_building_id:
+                return {
+                    "answer": "I'm not sure which building you mean — open it on the map or get closer so I can tell.",
+                    "sources": [],
+                }
+            floors = self.repo.list_building_floors(campus_id, effective_building_id)
+            if not floors:
+                return {"answer": "I don't have floor information for this building.", "sources": []}
+            bname = floors[0].get("building_name") or "this building"
+            labels = [
+                (f.get("floor_name") or self._ordinal_floor_label(f.get("floor_index")))
+                for f in floors
+            ]
+            if len(labels) == 1:
+                readable = labels[0]
+            else:
+                readable = ", ".join(labels[:-1]) + " and " + labels[-1]
+            n = len(floors)
+            print(f"[chat] floor-count: building={bname!r} floors={n}", flush=True)
+            return {
+                "answer": f"{bname} has {n} floor{'s' if n != 1 else ''}: {readable}.",
+                "sources": [bname],
+            }
+
+        # "Which floor am I on?" — answered from the floor the app is showing
+        # (the manually selected floor, or the barometer-derived one when none
+        # was picked), falling back to the nearest space's floor from GPS.
+        if self._which_floor_intent(user_query):
+            idx = floor_index
+            label = None
+            if idx is not None:
+                label = (
+                    self.repo.floor_label_for_index(campus_id, idx, effective_building_id)
+                    or self._ordinal_floor_label(idx)
+                )
+            elif loc and loc.get("floor_name"):
+                label = loc.get("floor_name")
+            if not label:
+                return {
+                    "answer": "I don't know which floor you're on yet — pick a floor on the map, or move so the barometer can detect it.",
+                    "sources": [],
+                }
+            building = user_building_name or "this building"
+            print(f"[chat] which-floor: floor_index={floor_index} label={label!r}", flush=True)
+            return {"answer": f"You're on {label} of {building}.", "sources": [label]}
 
         loc_intent = self._where_am_i_intent(user_query)
         print(f"[chat] intent: {loc_intent!r}", flush=True)
@@ -499,8 +606,13 @@ class AssistantService:
                 ans = f"You're near {loc['name']}{floor_part} in {building} (about {dist} m away)."
             return {"answer": ans, "sources": [loc["name"]]}
 
-        # Determine if user requested a global map question
-        if self._needs_global_map(user_query):
+        # "Closest/farthest X" anchored on the main entrance only makes sense
+        # WITHOUT a user position. When we know where the user is, a query like
+        # "where is the nearest toilet" should be answered relative to them, so
+        # we let it fall through to the find-place path (which filters spaces by
+        # a radius around the user's GPS).
+        have_gps = user_lat is not None and user_lon is not None
+        if self._needs_global_map(user_query) and not have_gps:
             extreme, candidate_types = self._distance_intent(user_query)
 
             # Anchor selection is modular and based on building data
@@ -548,17 +660,20 @@ class AssistantService:
             spaces = self.repo.search_spaces_on_floor(
                 campus_id, floor_idx, limit=20, building_id=building_id,
             )
-            if spaces:
-                floor_label = spaces[0].get("floor_name") or f"floor {floor_idx}"
-                building_label = spaces[0].get("building_name", "the building")
-                context_lines = [
-                    f"The following spaces are on {floor_label} (floor index {floor_idx}) in {building_label}:"
-                ]
-                for s in spaces:
-                    context_lines.append(f"- {s.get('name', '?')} ({s.get('type', 'space')})")
-                context_text = "\n".join(context_lines)
-            else:
-                context_text = f"No spaces found on floor index {floor_idx} for this campus."
+            # No spaces on that floor (or the floor doesn't exist) -> refuse
+            # deterministically. Handing "No spaces found" to the LLM let it
+            # fabricate (e.g. a basement morgue on a non-existent floor).
+            if not spaces:
+                print(f"[chat] floor-listing: no spaces on floor {floor_idx} -> refuse", flush=True)
+                return {"answer": "I don't have that information.", "sources": []}
+            floor_label = spaces[0].get("floor_name") or f"floor {floor_idx}"
+            building_label = spaces[0].get("building_name", "the building")
+            context_lines = [
+                f"The following spaces are on {floor_label} (floor index {floor_idx}) in {building_label}:"
+            ]
+            for s in spaces:
+                context_lines.append(f"- {s.get('name', '?')} ({s.get('type', 'space')})")
+            context_text = "\n".join(context_lines)
             similar_spaces = spaces
         else:
             query_vector = await self._encode_query(user_query)
@@ -624,18 +739,45 @@ class AssistantService:
                 flush=True,
             )
 
+            # "Where is X" / "is there a X" questions are answered
+            # deterministically. A confident match (cosine >= 0.30) is reported
+            # straight from the map data, so the small LLM can't mis-state the
+            # floor. Crucially, when NO match clears the threshold we refuse
+            # here — never handing an empty context to the LLM, which would
+            # otherwise fabricate a plausible room (the hallucination guard).
+            if self._find_place_intent(user_query):
+                if top_in and in_score >= _FIND_PLACE_MIN_SCORE:
+                    floor = _floor_label(top_in.get("floor_name"), top_in.get("floor_index"))
+                    building = top_in.get("building_name") or "the building"
+                    neighbours = [n for n in (top_in.get("connected_to") or []) if n][:3]
+                    near = f", near {', '.join(neighbours)}" if neighbours else ""
+                    name = top_in.get("name") or "It"
+                    print(f"[chat] find-place: {name!r} floor_idx={top_in.get('floor_index')}", flush=True)
+                    return {
+                        "answer": f"{name} is on {floor} of {building}{near}.",
+                        "sources": [name],
+                    }
+                print(
+                    f"[chat] find-place: no confident match "
+                    f"(top_score={in_score:.3f} < {_FIND_PLACE_MIN_SCORE}) -> refuse",
+                    flush=True,
+                )
+                return {"answer": "I don't have that information.", "sources": []}
+
             context_lines = []
             for s in similar_spaces:
-                location = f"located on {s.get('floor_name', 'an unknown floor')} in the {s.get('building_name', 'unknown building')}."
-                connections = s.get('connected_to', [])
-                if connections:
-                    conn_show = connections[:6]
-                    conn_str = ", ".join([f"{c.get('name', '?')} (via {c.get('connection_type', '?')})" for c in conn_show])
-                    more = "" if len(connections) <= len(conn_show) else f" (+{len(connections)-len(conn_show)} more)"
-                    graph_context = f" It directly connects to: {conn_str}{more}."
+                floor = _floor_label(s.get("floor_name"), s.get("floor_index"))
+                building = s.get("building_name") or "the building"
+                location = f"on {floor} of {building}"
+                # connected_to is now a list of real neighbour names (doors and
+                # other connectors are filtered out and hopped through upstream).
+                neighbours = [n for n in (s.get("connected_to") or []) if n]
+                if neighbours:
+                    near = ", ".join(neighbours[:5])
+                    graph_context = f", near {near}"
                 else:
-                    graph_context = " It has no mapped connections."
-                context_lines.append(f"- {s.get('name','?')} ({s.get('type','space')}) is {location}{graph_context}")
+                    graph_context = ""
+                context_lines.append(f"- {s.get('name','?')} is {location}{graph_context}.")
             context_text = "\n".join(context_lines)
 
         prompt_path = Path(__file__).resolve().parents[1] / "core" / "prompt" / "prompt.txt"

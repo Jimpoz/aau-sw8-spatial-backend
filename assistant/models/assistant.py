@@ -7,6 +7,7 @@ class ChatRequest(BaseModel):
     building_id: str | None = None
     user_lat: float | None = None
     user_lon: float | None = None
+    floor_index: int | None = None
 
 class ChatResponse(BaseModel):
     answer: str

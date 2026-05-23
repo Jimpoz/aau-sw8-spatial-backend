@@ -19,5 +19,6 @@ async def chat_endpoint(
         building_id=request.building_id,
         user_lat=request.user_lat,
         user_lon=request.user_lon,
+        floor_index=request.floor_index,
     )
     return result
