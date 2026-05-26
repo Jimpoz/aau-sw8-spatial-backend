@@ -16,6 +16,7 @@ from services.geometry_service import (
     find_shared_edge_midpoint,
     local_to_global_coordinates,
 )
+from services.gds_service import GdsService
 from services.postgis_service import PostGISService
 from services.space_sync import build_space_sync_payload
 
@@ -51,11 +52,17 @@ def create_connection(
     with audit_action("create_connection", principal, organization_id=org_id) as detail:
         detail["from_space_id"] = data.from_space_id
         detail["to_space_id"] = data.to_space_id
+        campus_id = space_a.get("campus_id")
+        floor_a = space_a.get("floor_id")
+        floor_b = space_b.get("floor_id")
+        is_cross_floor = floor_a != floor_b
+
         poly_a = space_a.get("polygon")
         poly_b = space_b.get("polygon")
         cx, cy = None, None
 
-        if poly_a and poly_b:
+        if not is_cross_floor and poly_a and poly_b:
+            # Same-floor: use the shared wall midpoint as the door position.
             result = find_shared_edge_midpoint(poly_a, poly_b)
             if result:
                 cx, cy = result
@@ -63,7 +70,12 @@ def create_connection(
         if cx is None and cy is None:
             cx_a, cy_a = space_a.get("centroid_x"), space_a.get("centroid_y")
             cx_b, cy_b = space_b.get("centroid_x"), space_b.get("centroid_y")
-            if all(v is not None for v in (cx_a, cy_a, cx_b, cy_b)):
+            if is_cross_floor:
+                if cx_a is not None and cy_a is not None:
+                    cx, cy = cx_a, cy_a
+                elif cx_b is not None and cy_b is not None:
+                    cx, cy = cx_b, cy_b
+            elif all(v is not None for v in (cx_a, cy_a, cx_b, cy_b)):
                 cx = (cx_a + cx_b) / 2.0
                 cy = (cy_a + cy_b) / 2.0
 
@@ -72,10 +84,7 @@ def create_connection(
 
         traversal_cost = compute_traversal_cost(data.space_type.value, None, None, None)
 
-        campus_id = space_a.get("campus_id")
-        floor_a = space_a.get("floor_id")
-        floor_b = space_b.get("floor_id")
-        floor_id = floor_a if floor_a == floor_b else None
+        floor_id = floor_a if not is_cross_floor else None
 
         # Create the intermediate door/passage node as a Space
         door_space = space_repo.create_space(
@@ -247,6 +256,17 @@ def patch_connection(
                 door_space = space_repo.update_space(door_id, update)
             except Exception:
                 raise HTTPException(status_code=404, detail=f"Door space '{door_id}' not found")
+
+            if data.door_cx is not None and data.door_cy is not None and (
+                global_lat is None or global_lng is None
+            ):
+                db.execute_write(
+                    "MATCH (s:Space {id: $id}) REMOVE s.centroid_lat, s.centroid_lng",
+                    {"id": door_id},
+                )
+
+            if data.door_cx is not None or data.door_cy is not None:
+                GdsService(db).refresh_projection()
 
             postgis = PostGISService()
             postgis.sync_space(build_space_sync_payload(door_space, CampusRepository(db)))

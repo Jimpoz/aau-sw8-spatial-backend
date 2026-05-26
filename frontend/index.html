@@ -335,6 +335,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <label for="new-conn-accessible">Accessible</label>
       </div>
       <p class="tool-hint" id="connect-status">Click the first space (start), then click the second space (end).</p>
+      <!-- Cross-floor target picker — shown for vertical connection types -->
+      <div id="cross-floor-panel" style="display:none; margin-top:8px; padding:10px; background:#f0f7ff; border-radius:6px; border:1px solid #c8dff8;">
+        <p style="font-size:12px; color:#4a90d9; font-weight:600; margin-bottom:8px;">↕ Cross-floor destination</p>
+        <label for="xfloor-target-floor" style="font-size:12px">Target Floor</label>
+        <select id="xfloor-target-floor" style="width:100%; padding:6px 8px; border:1px solid #ddd; border-radius:5px; font-size:13px; margin-bottom:8px; background:#fff;">
+          <option value="">Select floor…</option>
+        </select>
+        <label for="xfloor-target-space" style="font-size:12px">Target Space on that floor</label>
+        <select id="xfloor-target-space" disabled style="width:100%; padding:6px 8px; border:1px solid #ddd; border-radius:5px; font-size:13px; margin-bottom:8px; background:#fff;">
+          <option value="">Select floor first…</option>
+        </select>
+        <button id="xfloor-connect-btn" class="btn-primary" disabled style="width:100%; padding:8px; font-size:13px;">Connect to Other Floor</button>
+      </div>
     </div>
   </div>
 
@@ -2606,6 +2619,7 @@ $('delete-org-btn').addEventListener('click', async () => {
 function setMode(mode) {
   state.mode = mode;
   state.connectFrom = null;
+  resetCrossFloorPanel();
 
   if (mode !== 'addSpace') resetPendingPolygon();
 
@@ -2628,6 +2642,17 @@ function setMode(mode) {
   }
 
   render();
+}
+
+const VERTICAL_CONN_TYPES = new Set(['STAIRCASE', 'ELEVATOR', 'ESCALATOR', 'RAMP']);
+function isVerticalConnType(type) { return VERTICAL_CONN_TYPES.has((type || '').toUpperCase()); }
+
+function resetCrossFloorPanel() {
+  $('cross-floor-panel').style.display = 'none';
+  $('xfloor-target-floor').innerHTML = '<option value="">Select floor…</option>';
+  $('xfloor-target-space').innerHTML = '<option value="">Select floor first…</option>';
+  $('xfloor-target-space').disabled = true;
+  $('xfloor-connect-btn').disabled = true;
 }
 
 $('tool-select').addEventListener('click', () => setMode('select'));
@@ -2929,7 +2954,26 @@ async function handleConnectClick(canvasX, canvasY) {
 
   if (!state.connectFrom) {
     state.connectFrom = space;
+    const spaceType = $('new-conn-type').value;
     $('connect-status').innerHTML = `From: <span class="connect-from-badge">${space.display_name}</span><br>Now click the second space.`;
+
+    // For vertical connection types, also show the cross-floor picker so the
+    // user can connect to a space on a different floor without having to
+    // manually switch floors and re-click.
+    if (isVerticalConnType(spaceType)) {
+      const panel = $('cross-floor-panel');
+      const floorSel = $('xfloor-target-floor');
+      floorSel.innerHTML = '<option value="">Select floor…</option>';
+      for (const f of (state.floors || [])) {
+        if (f.id === state.selectedFloorId) continue; // exclude current floor
+        const opt = document.createElement('option');
+        opt.value = f.id;
+        opt.textContent = f.display_name;
+        floorSel.appendChild(opt);
+      }
+      panel.style.display = 'block';
+    }
+
     render();
     return;
   }
@@ -2943,9 +2987,13 @@ async function handleConnectClick(canvasX, canvasY) {
   const accessible = $('new-conn-accessible').checked;
   const from = state.connectFrom;
 
+  await submitConnection(from.id, from.display_name, space.id, space.display_name, spaceType, accessible);
+}
+
+async function submitConnection(fromId, fromName, toId, toName, spaceType, accessible) {
   const connData = {
-    from_space_id: from.id,
-    to_space_id: space.id,
+    from_space_id: fromId,
+    to_space_id: toId,
     space_type: spaceType,
     display_name: spaceType.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
     is_accessible: accessible,
@@ -2958,18 +3006,67 @@ async function handleConnectClick(canvasX, canvasY) {
       body: JSON.stringify(connData),
     });
 
-    notify(`Connected "${from.display_name}" to "${space.display_name}"`);
+    notify(`Connected "${fromName}" → "${toName}"`);
     state.connectFrom = null;
+    resetCrossFloorPanel();
     $('connect-status').textContent = 'Click the first space (start), then click the second space (end).';
     $('connect-status').className = 'tool-hint';
 
-    // Refresh floor display (door nodes appear as spaces now)
+    // Refresh floor display (door/connection nodes appear as spaces)
     await reloadCurrentFloor();
 
     // Refresh GDS projection
     api('/navigate/refresh-graph', { method: 'POST' }).catch(() => {});
-  } catch (e) { /* handled */ }
+  } catch (e) { /* handled by api() */ }
 }
+
+/* ═══════════════════════════════════════════════
+   Cross-floor connection panel handlers
+   ═══════════════════════════════════════════════ */
+$('xfloor-target-floor').addEventListener('change', async function() {
+  const floorId = this.value;
+  const spaceSel = $('xfloor-target-space');
+  const btn = $('xfloor-connect-btn');
+  spaceSel.innerHTML = '<option value="">Loading…</option>';
+  spaceSel.disabled = true;
+  btn.disabled = true;
+  if (!floorId) {
+    spaceSel.innerHTML = '<option value="">Select floor first…</option>';
+    return;
+  }
+  try {
+    const display = await api(`/floors/${floorId}/display`);
+    const spacesRaw = Array.isArray(display) ? display : (display.spaces || []);
+    // Exclude door/connection intermediary nodes — show only real rooms
+    const CONN_TYPES = new Set(['DOOR_STANDARD','DOOR_AUTOMATIC','DOOR_LOCKED','DOOR_EMERGENCY','PASSAGE']);
+    const rooms = spacesRaw.filter(s => !CONN_TYPES.has(s.space_type));
+    spaceSel.innerHTML = '<option value="">Select space…</option>';
+    for (const s of rooms) {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = s.display_name || s.id;
+      spaceSel.appendChild(opt);
+    }
+    spaceSel.disabled = false;
+  } catch (e) {
+    spaceSel.innerHTML = '<option value="">Error loading spaces</option>';
+  }
+});
+
+$('xfloor-target-space').addEventListener('change', function() {
+  $('xfloor-connect-btn').disabled = !this.value;
+});
+
+$('xfloor-connect-btn').addEventListener('click', async function() {
+  if (!state.connectFrom) return;
+  const toSpaceId = $('xfloor-target-space').value;
+  const toSpaceName = $('xfloor-target-space').selectedOptions[0]?.text || toSpaceId;
+  if (!toSpaceId) return;
+  const spaceType = $('new-conn-type').value;
+  const accessible = $('new-conn-accessible').checked;
+  const from = state.connectFrom;
+  await submitConnection(from.id, from.display_name, toSpaceId, toSpaceName, spaceType, accessible);
+});
 
 /* ═══════════════════════════════════════════════
    Context Menu
