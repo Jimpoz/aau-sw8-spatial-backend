@@ -6,9 +6,12 @@ import math
 from typing import Any
 
 from db import Database
+from services.geometry_service import closest_point_on_polygon, parse_polygon
 
 
 _WALKING_SPEED_MS = 1.4
+
+_DEFAULT_FLOOR_HEIGHT_M = 3.3
 
 _CONNECTION_TYPES: set[str] = {
     "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY",
@@ -17,26 +20,67 @@ _CONNECTION_TYPES: set[str] = {
 }
 
 
+def _room_exit_point(
+    room: dict,
+    door_x: float,
+    door_y: float,
+) -> tuple[float, float]:
+    """Where you'd realistically *leave* a room to traverse the given door.
+    Falls back to the room's centroid if the polygon isn't available — i.e.
+    we never make the estimate *worse* than today's behaviour."""
+    polygon = parse_polygon(room.get("polygon"))
+    cx = room.get("centroid_x")
+    cy = room.get("centroid_y")
+    cx_f = float(cx) if cx is not None else None
+    cy_f = float(cy) if cy is not None else None
+    if polygon is None:
+        return (cx_f or door_x, cy_f or door_y)
+    snap = closest_point_on_polygon(polygon, door_x, door_y)
+    return snap
+
+
 def _edge_weight(src: dict, dst: dict) -> float:
-    """Edge cost in seconds: walking time between centroids plus
-    a per-node transition penalty for connection-type targets."""
-    have_centroids = (
-        src.get("centroid_x") is not None
-        and src.get("centroid_y") is not None
-        and dst.get("centroid_x") is not None
-        and dst.get("centroid_y") is not None
-    )
+    """Edge cost in seconds. Walking-time approximation:
+
+    - Same-floor, same-building: Euclidean distance, but snap the room's
+      endpoint to the polygon edge nearest the door when one side of the
+      edge is a connector — represents exiting through the actual doorway.
+    - Cross-floor / cross-building: 3D Pythagorean distance using a
+      per-floor vertical step.
+
+    Connection-type targets carry a fixed traversal penalty (the time it
+    takes to actually pass through the elevator, open the door, etc.)."""
+    sx, sy = src.get("centroid_x"), src.get("centroid_y")
+    dx, dy = dst.get("centroid_x"), dst.get("centroid_y")
+    have_centroids = None not in (sx, sy, dx, dy)
+
     src_fi, dst_fi = src.get("floor_index"), dst.get("floor_index")
     src_bi, dst_bi = src.get("building_id"), dst.get("building_id")
-    different_frame = (
-        (src_fi is not None and dst_fi is not None and src_fi != dst_fi)
-        or (src_bi is not None and dst_bi is not None and src_bi != dst_bi)
+    floor_step = (
+        abs(int(src_fi) - int(dst_fi))
+        if src_fi is not None and dst_fi is not None
+        else 0
+    )
+    different_building = (
+        src_bi is not None and dst_bi is not None and src_bi != dst_bi
     )
 
-    if have_centroids and not different_frame:
-        dx = float(src["centroid_x"]) - float(dst["centroid_x"])
-        dy = float(src["centroid_y"]) - float(dst["centroid_y"])
-        dist_m = math.sqrt(dx * dx + dy * dy)
+    dist_m: float
+    if have_centroids and floor_step == 0 and not different_building:
+        src_is_conn = src.get("space_type") in _CONNECTION_TYPES
+        dst_is_conn = dst.get("space_type") in _CONNECTION_TYPES
+        if src_is_conn and not dst_is_conn:
+            ex, ey = _room_exit_point(dst, float(sx), float(sy))
+            dist_m = math.hypot(float(sx) - ex, float(sy) - ey)
+        elif dst_is_conn and not src_is_conn:
+            ex, ey = _room_exit_point(src, float(dx), float(dy))
+            dist_m = math.hypot(ex - float(dx), ey - float(dy))
+        else:
+            dist_m = math.hypot(float(sx) - float(dx), float(sy) - float(dy))
+    elif have_centroids and floor_step > 0 and not different_building:
+        horizontal = math.hypot(float(sx) - float(dx), float(sy) - float(dy))
+        vertical = floor_step * _DEFAULT_FLOOR_HEIGHT_M
+        dist_m = math.hypot(horizontal, vertical)
     else:
         dist_m = 1.0
 

@@ -15,6 +15,10 @@ from models.landmark import Landmark
 from repositories.landmark_repo import LandmarkRepository
 from repositories.space_repo import SpaceRepository
 from services.audit_service import audit_action
+from services.geometry_service import (
+    global_to_local_coordinates,
+    local_to_global_coordinates,
+)
 from services.postgis_service import PostGISService
 
 router = APIRouter(prefix="/landmarks", tags=["landmarks"])
@@ -37,16 +41,88 @@ def _image_dimensions(image_bytes: bytes) -> tuple[Optional[int], Optional[int]]
         return None, None
 
 
+def _space_georef(db: Database, space: dict) -> Optional[dict]:
+    """Floor georef for a Space."""
+    floor_id = space.get("floor_id") if isinstance(space, dict) else None
+    building_id = space.get("building_id") if isinstance(space, dict) else None
+    if not floor_id and not building_id:
+        return None
+    rows = db.execute(
+        """
+        OPTIONAL MATCH (f:Floor {id: $floor_id})
+        OPTIONAL MATCH (b:Building {id: $building_id})
+        RETURN
+          coalesce(f.origin_lat, b.origin_lat)         AS lat,
+          coalesce(f.origin_lng, b.origin_lng)         AS lng,
+          coalesce(f.origin_bearing, b.origin_bearing) AS bearing,
+          coalesce(f.scale_factor, b.scale_factor)     AS scale
+        """,
+        {"floor_id": floor_id, "building_id": building_id},
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    if r["lat"] is None or r["lng"] is None:
+        return None
+    return {
+        "origin_lat": float(r["lat"]),
+        "origin_lng": float(r["lng"]),
+        "bearing": float(r["bearing"] or 0.0),
+        "scale": float(r["scale"] or 1.0),
+    }
+
+
+def _resolve_landmark_coords(
+    *,
+    space: dict,
+    cx: Optional[float],
+    cy: Optional[float],
+    c_lat: Optional[float],
+    c_lng: Optional[float],
+    db: Optional[Database] = None,
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """Cross-fill landmark coordinates between local-floor (x, y) and
+    WGS84 (lat, lng). Returns (cx, cy, c_lat, c_lng); each pair is either
+    both populated or both None when no georef is available."""
+    have_local = cx is not None and cy is not None
+    have_global = c_lat is not None and c_lng is not None
+    if have_local == have_global:
+        return cx, cy, c_lat, c_lng
+    if db is None:
+        return cx, cy, c_lat, c_lng
+    georef = _space_georef(db, space)
+    if georef is None:
+        return cx, cy, c_lat, c_lng
+    if have_local:
+        lat, lng = local_to_global_coordinates(
+            float(cx), float(cy),
+            georef["origin_lat"], georef["origin_lng"],
+            georef["bearing"], georef["scale"],
+        )
+        return cx, cy, lat, lng
+    # have_global
+    lx, ly = global_to_local_coordinates(
+        float(c_lat), float(c_lng),
+        georef["origin_lat"], georef["origin_lng"],
+        georef["bearing"],
+    )
+    return lx, ly, c_lat, c_lng
+
+
 @router.post("", response_model=Landmark, status_code=201)
 async def create_landmark(
     name: str = Form(..., min_length=1, max_length=120),
     space_id: str = Form(...),
     image: UploadFile = File(...),
+    centroid_x: Optional[float] = Form(None),
+    centroid_y: Optional[float] = Form(None),
+    centroid_lat: Optional[float] = Form(None),
+    centroid_lng: Optional[float] = Form(None),
     db: Database = Depends(get_db),
     principal: Principal = Depends(require_role("editor")),
 ):
     """Register a new visual landmark for a Space."""
-    
+
     try:
         space = SpaceRepository(db).get_space(space_id)
     except SpaceNotFound as exc:
@@ -74,6 +150,15 @@ async def create_landmark(
     landmark_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
 
+    cx, cy, c_lat, c_lng = _resolve_landmark_coords(
+        space=space,
+        cx=centroid_x,
+        cy=centroid_y,
+        c_lat=centroid_lat,
+        c_lng=centroid_lng,
+        db=db,
+    )
+
     with audit_action(
         "create_landmark", principal, organization_id=org_id
     ) as detail:
@@ -81,6 +166,8 @@ async def create_landmark(
         detail["space_id"] = space_id
         detail["name"] = name
         detail["image_bytes"] = len(image_bytes)
+        detail["centroid_x"] = cx
+        detail["centroid_y"] = cy
         record = LandmarkRepository(db).create_landmark(
             landmark_id=landmark_id,
             name=name,
@@ -88,10 +175,14 @@ async def create_landmark(
             image_b64=image_b64,
             image_width=width,
             image_height=height,
+            centroid_x=cx,
+            centroid_y=cy,
+            centroid_lat=c_lat,
+            centroid_lng=c_lng,
             created_by=principal.user_id,
             created_at=created_at,
         )
-        
+
         sync_payload = dict(record)
         sync_payload["image_b64"] = image_b64
         sync_payload.setdefault("organization_id", org_id)

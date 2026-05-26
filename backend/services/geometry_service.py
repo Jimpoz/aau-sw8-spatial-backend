@@ -1,5 +1,6 @@
+import json
 import math
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 try:
     from shapely.geometry import Polygon as ShapelyPolygon
@@ -7,6 +8,61 @@ try:
     _SHAPELY = True
 except ImportError:
     _SHAPELY = False
+
+
+def parse_polygon(raw: Any) -> Optional[list[tuple[float, float]]]:
+    """Polygons round-trip through Neo4j as either a JSON-encoded string
+    (Neo4j can't hold a list of lists directly) or a Python list after the
+    driver deserialises. Returns a normalised list of (x, y) tuples, or
+    None when the value is missing or unparseable."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        return None
+    out: list[tuple[float, float]] = []
+    for p in raw:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            continue
+        try:
+            out.append((float(p[0]), float(p[1])))
+        except (TypeError, ValueError):
+            continue
+    return out if len(out) >= 2 else None
+
+
+def closest_point_on_polygon(
+    polygon: list[tuple[float, float]],
+    tx: float,
+    ty: float,
+) -> tuple[float, float]:
+    """Project (tx, ty) onto each polygon edge segment and return the
+    nearest point on the boundary. Used by the router to model "exit
+    through the nearest wall" instead of teleporting to the centroid."""
+    best_d2 = math.inf
+    best = polygon[0]
+    n = len(polygon)
+    for i in range(n):
+        ax, ay = polygon[i]
+        bx, by = polygon[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        len2 = dx * dx + dy * dy
+        if len2 == 0.0:
+            px, py = ax, ay
+        else:
+            t = ((tx - ax) * dx + (ty - ay) * dy) / len2
+            t = 0.0 if t < 0.0 else 1.0 if t > 1.0 else t
+            px = ax + t * dx
+            py = ay + t * dy
+        d2 = (tx - px) ** 2 + (ty - py) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            best = (px, py)
+    return best
 
 
 def centroid_from_polygon(polygon: list[list[float]]) -> tuple[float, float]:

@@ -29,6 +29,10 @@ class LandmarkRepository:
         image_b64: str,
         image_width: Optional[int] = None,
         image_height: Optional[int] = None,
+        centroid_x: Optional[float] = None,
+        centroid_y: Optional[float] = None,
+        centroid_lat: Optional[float] = None,
+        centroid_lng: Optional[float] = None,
         created_by: Optional[str] = None,
         created_at: Optional[str] = None,
     ) -> dict:
@@ -50,6 +54,10 @@ class LandmarkRepository:
                 l.image_b64      = $image_b64,
                 l.image_width    = $image_width,
                 l.image_height   = $image_height,
+                l.centroid_x     = $centroid_x,
+                l.centroid_y     = $centroid_y,
+                l.centroid_lat   = $centroid_lat,
+                l.centroid_lng   = $centroid_lng,
                 l.created_by     = $created_by,
                 l.created_at     = $created_at
             MERGE (s)-[:HAS_LANDMARK]->(l)
@@ -62,6 +70,10 @@ class LandmarkRepository:
                    l.organization_id AS organization_id,
                    l.image_width     AS image_width,
                    l.image_height    AS image_height,
+                   l.centroid_x      AS centroid_x,
+                   l.centroid_y      AS centroid_y,
+                   l.centroid_lat    AS centroid_lat,
+                   l.centroid_lng    AS centroid_lng,
                    l.created_by      AS created_by,
                    l.created_at      AS created_at
             """,
@@ -72,6 +84,10 @@ class LandmarkRepository:
                 "image_b64": image_b64,
                 "image_width": image_width,
                 "image_height": image_height,
+                "centroid_x": centroid_x,
+                "centroid_y": centroid_y,
+                "centroid_lat": centroid_lat,
+                "centroid_lng": centroid_lng,
                 "created_by": created_by,
                 "created_at": created_at,
             },
@@ -105,6 +121,10 @@ class LandmarkRepository:
                    l.organization_id AS organization_id,
                    l.image_width     AS image_width,
                    l.image_height    AS image_height,
+                   l.centroid_x      AS centroid_x,
+                   l.centroid_y      AS centroid_y,
+                   l.centroid_lat    AS centroid_lat,
+                   l.centroid_lng    AS centroid_lng,
                    l.created_by      AS created_by,
                    l.created_at      AS created_at
             """,
@@ -125,6 +145,10 @@ class LandmarkRepository:
                    l.organization_id AS organization_id,
                    l.image_width     AS image_width,
                    l.image_height    AS image_height,
+                   l.centroid_x      AS centroid_x,
+                   l.centroid_y      AS centroid_y,
+                   l.centroid_lat    AS centroid_lat,
+                   l.centroid_lng    AS centroid_lng,
                    l.created_by      AS created_by,
                    l.created_at      AS created_at
             ORDER BY l.created_at DESC
@@ -146,6 +170,10 @@ class LandmarkRepository:
                    l.organization_id AS organization_id,
                    l.image_width     AS image_width,
                    l.image_height    AS image_height,
+                   l.centroid_x      AS centroid_x,
+                   l.centroid_y      AS centroid_y,
+                   l.centroid_lat    AS centroid_lat,
+                   l.centroid_lng    AS centroid_lng,
                    l.created_by      AS created_by,
                    l.created_at      AS created_at
             ORDER BY l.created_at DESC
@@ -160,16 +188,22 @@ class LandmarkRepository:
         rows = self.db.execute(
             """
             MATCH (l:Landmark {campus_id: $campus_id})
+            OPTIONAL MATCH (f:Floor {id: l.floor_id})
             RETURN l.id              AS id,
                    l.name            AS name,
                    l.space_id        AS space_id,
                    l.floor_id        AS floor_id,
+                   f.floor_index     AS floor_index,
                    l.building_id     AS building_id,
                    l.campus_id       AS campus_id,
                    l.organization_id AS organization_id,
                    l.image_b64       AS image_b64,
                    l.image_width     AS image_width,
-                   l.image_height    AS image_height
+                   l.image_height    AS image_height,
+                   l.centroid_x      AS centroid_x,
+                   l.centroid_y      AS centroid_y,
+                   l.centroid_lat    AS centroid_lat,
+                   l.centroid_lng    AS centroid_lng
             """,
             {"campus_id": campus_id},
         )

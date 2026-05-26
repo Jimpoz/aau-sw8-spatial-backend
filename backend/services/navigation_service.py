@@ -5,8 +5,10 @@ from models.navigation import Route, RouteStep, FloorChange, BuildingChange
 from models.enums import SpaceType
 from repositories.navigation_repo import NavigationRepository
 from services.geometry_service import (
+    closest_point_on_polygon,
     find_shared_edge_midpoint,
     local_to_global_coordinates,
+    parse_polygon,
 )
 
 
@@ -126,6 +128,32 @@ class NavigationService:
                 return None
             return [float(lat), float(lng)]
 
+        def _endpoint_exit_point(node: dict, target: dict) -> list[float] | None:
+            """Snap the start or end of the polyline from a room's centroid
+            to the point on its polygon boundary closest to the adjacent
+            connector. 
+
+            Returns ``None`` when the polygon, georef, or target's local
+            coordinates aren't available — caller falls back to the
+            centroid in that case."""
+            polygon = parse_polygon(node.get("polygon"))
+            if polygon is None:
+                return None
+            tx = target.get("centroid_x")
+            ty = target.get("centroid_y")
+            if tx is None or ty is None:
+                return None
+            g = georefs.get(node["id"])
+            if g is None or g.get("origin_lat") is None or g.get("origin_lng") is None:
+                return None
+            sx, sy = closest_point_on_polygon(polygon, float(tx), float(ty))
+            lat, lng = local_to_global_coordinates(
+                sx, sy,
+                g["origin_lat"], g["origin_lng"],
+                g["bearing"], g["scale"],
+            )
+            return [float(lat), float(lng)]
+
         centroids: list[list[float] | None] = [
             _global_centroid(node, i) for i, node in enumerate(path_nodes)
         ]
@@ -162,11 +190,25 @@ class NavigationService:
                 mid_lng + alpha * (room_c[1] - mid_lng),
             ]
 
+        snapped_start: list[float] | None = None
+        snapped_end: list[float] | None = None
+        if not self._is_connector(path_nodes[0]) and n >= 2:
+            snapped_start = _endpoint_exit_point(path_nodes[0], path_nodes[1])
+        if not self._is_connector(path_nodes[n - 1]) and n >= 2:
+            snapped_end = _endpoint_exit_point(path_nodes[n - 1], path_nodes[n - 2])
+
         polyline: list[list[float]] = []
         for i in range(n):
             if _is_anchor(i):
-                if centroids[i] is not None:
-                    polyline.append(centroids[i])
+                point: list[float] | None
+                if i == 0 and snapped_start is not None:
+                    point = snapped_start
+                elif i == n - 1 and snapped_end is not None:
+                    point = snapped_end
+                else:
+                    point = centroids[i]
+                if point is not None:
+                    polyline.append(point)
             else:
                 pulled = _pulled_in_waypoint(i)
                 if pulled is not None:

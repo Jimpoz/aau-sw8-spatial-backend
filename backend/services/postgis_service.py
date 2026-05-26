@@ -398,6 +398,10 @@ class Landmark(Base):
     image_b64 = Column(Text)
     image_width = Column(Integer)
     image_height = Column(Integer)
+    centroid_x = Column(Float)
+    centroid_y = Column(Float)
+    centroid_lat = Column(Float)
+    centroid_lng = Column(Float)
     created_by = Column(String, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -1301,6 +1305,10 @@ class PostGISService:
                 record.image_b64 = landmark_data["image_b64"]
             record.image_width     = landmark_data.get("image_width", record.image_width)
             record.image_height    = landmark_data.get("image_height", record.image_height)
+            record.centroid_x      = landmark_data.get("centroid_x", record.centroid_x)
+            record.centroid_y      = landmark_data.get("centroid_y", record.centroid_y)
+            record.centroid_lat    = landmark_data.get("centroid_lat", record.centroid_lat)
+            record.centroid_lng    = landmark_data.get("centroid_lng", record.centroid_lng)
             record.updated_at      = datetime.utcnow()
         else:
             record = Landmark(
@@ -1314,6 +1322,10 @@ class PostGISService:
                 image_b64=landmark_data.get("image_b64"),
                 image_width=landmark_data.get("image_width"),
                 image_height=landmark_data.get("image_height"),
+                centroid_x=landmark_data.get("centroid_x"),
+                centroid_y=landmark_data.get("centroid_y"),
+                centroid_lat=landmark_data.get("centroid_lat"),
+                centroid_lng=landmark_data.get("centroid_lng"),
                 created_by=landmark_data.get("created_by"),
             )
             if landmark_data.get("created_at"):
