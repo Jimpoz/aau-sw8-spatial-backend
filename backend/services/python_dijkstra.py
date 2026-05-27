@@ -1,4 +1,11 @@
-"""Weighted Dijkstra implemented in pure Python over Cypher reads."""
+"""Weighted A* implemented in pure Python over Cypher reads.
+
+Uses a geographic straight-line heuristic so that when two frontier nodes
+have equal g-cost (e.g., left-corridor vs right-corridor segment both
+equidistant from the current hub), the one geometrically closer to the
+destination is explored first.  This prevents arbitrary UUID-order
+tie-breaking from sending the route in the wrong direction.
+"""
 from __future__ import annotations
 
 import heapq
@@ -13,9 +20,11 @@ _WALKING_SPEED_MS = 1.4
 
 _DEFAULT_FLOOR_HEIGHT_M = 3.3
 
+# All space types that act as connection/transition nodes.
+# OPEN is included so polygon-edge snapping applies to open-passage nodes.
 _CONNECTION_TYPES: set[str] = {
     "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED", "DOOR_EMERGENCY",
-    "PASSAGE",
+    "PASSAGE", "OPEN",
     "ELEVATOR", "STAIRCASE", "ESCALATOR", "RAMP",
 }
 
@@ -154,22 +163,39 @@ def find_path(
                 continue
         adj[src_id].append((dst_id, _edge_weight(src, dst)))
 
-    # Standard binary-heap Dijkstra
+    # A* with straight-line geographic heuristic.
+    # h(n) = Euclidean distance from n to goal / walking_speed (admissible, never
+    # overestimates).  This breaks ties in favour of nodes that are geographically
+    # closer to the destination, preventing UUID-order tie-breaking from routing
+    # through a corridor segment that is further away from the destination.
+    goal = by_id.get(to_id, {})
+    gx, gy = goal.get("centroid_x"), goal.get("centroid_y")
+
+    def _h(node_id: str) -> float:
+        if gx is None or gy is None:
+            return 0.0
+        n = by_id.get(node_id, {})
+        nx, ny = n.get("centroid_x"), n.get("centroid_y")
+        if nx is None or ny is None:
+            return 0.0
+        return math.hypot(float(nx) - float(gx), float(ny) - float(gy)) / _WALKING_SPEED_MS
+
     dist: dict[str, float] = {from_id: 0.0}
     prev: dict[str, str | None] = {from_id: None}
-    heap: list[tuple[float, str]] = [(0.0, from_id)]
+    heap: list[tuple[float, str]] = [(_h(from_id), from_id)]
     while heap:
-        d, u = heapq.heappop(heap)
+        f, u = heapq.heappop(heap)
         if u == to_id:
             break
-        if d > dist.get(u, math.inf):
+        g = dist.get(u, math.inf)
+        if f - _h(u) > g + 1e-9:   # stale entry
             continue
         for v, w in adj.get(u, []):
-            nd = d + w
-            if nd < dist.get(v, math.inf):
-                dist[v] = nd
+            ng = g + w
+            if ng < dist.get(v, math.inf):
+                dist[v] = ng
                 prev[v] = u
-                heapq.heappush(heap, (nd, v))
+                heapq.heappush(heap, (ng + _h(v), v))
 
     if to_id not in dist:
         return None
