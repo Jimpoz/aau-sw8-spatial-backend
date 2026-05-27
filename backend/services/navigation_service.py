@@ -84,16 +84,32 @@ class NavigationService:
         self,
         path_nodes: list[dict],
         georefs: dict[str, dict],
-    ) -> list[list[float]]:
+    ) -> tuple[list[list[float]], dict[int, list[list[float]]]]:
         """Build the rendered route line."""
 
+        def _group_by_floor(
+            pts: list[list[float]], floors: list[int | None]
+        ) -> dict[int, list[list[float]]]:
+            by_floor: dict[int, list[list[float]]] = {}
+            for pt, fi in zip(pts, floors):
+                if fi is not None:
+                    by_floor.setdefault(fi, []).append(pt)
+            return by_floor
+
         if len(path_nodes) < 2:
-            return [
+            pts = [
                 [n["centroid_lat"], n["centroid_lng"]]
                 for n in path_nodes
                 if n.get("centroid_lat") is not None
                 and n.get("centroid_lng") is not None
             ]
+            floors = [
+                n.get("floor_index")
+                for n in path_nodes
+                if n.get("centroid_lat") is not None
+                and n.get("centroid_lng") is not None
+            ]
+            return pts, _group_by_floor(pts, floors)
 
         n = len(path_nodes)
         transitions: list[list[float] | None] = [
@@ -198,7 +214,10 @@ class NavigationService:
             snapped_end = _endpoint_exit_point(path_nodes[n - 1], path_nodes[n - 2])
 
         polyline: list[list[float]] = []
+        polyline_floors: list[int | None] = []  # parallel floor-index per point
+
         for i in range(n):
+            fi = path_nodes[i].get("floor_index")
             if _is_anchor(i):
                 point: list[float] | None
                 if i == 0 and snapped_start is not None:
@@ -209,13 +228,17 @@ class NavigationService:
                     point = centroids[i]
                 if point is not None:
                     polyline.append(point)
+                    polyline_floors.append(fi)
             else:
                 pulled = _pulled_in_waypoint(i)
                 if pulled is not None:
                     polyline.append(pulled)
+                    polyline_floors.append(fi)
             if i < n - 1 and transitions[i] is not None:
                 polyline.append(transitions[i])
-        return polyline
+                polyline_floors.append(fi)
+
+        return polyline, _group_by_floor(polyline, polyline_floors)
 
     _CONNECTOR_SPACE_TYPES: frozenset[str] = frozenset({
         "PASSAGE",
@@ -319,7 +342,7 @@ class NavigationService:
 
         self._enrich_global_coords(path_nodes, georefs)
 
-        polyline = self._build_polyline(path_nodes, georefs)
+        polyline, polylines_by_floor = self._build_polyline(path_nodes, georefs)
 
         steps: list[RouteStep] = []
         floor_changes: list[FloorChange] = []
@@ -383,4 +406,5 @@ class NavigationService:
             floor_changes=floor_changes,
             building_changes=building_changes,
             polyline=polyline,
+            polylines_by_floor=polylines_by_floor,
         )
