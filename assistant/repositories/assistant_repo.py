@@ -620,11 +620,12 @@ class AssistantRepository:
         lat: float,
         lon: float,
         building_radius_m: float = 1500.0,
+        max_nearest_distance_m: float = 1500.0,
     ) -> dict | None:
-
         rows = self.db.execute(
             """
             MATCH (b:Building)
+            WHERE b.campus_id = $campus_id
             OPTIONAL MATCH (b)-[:HAS_FLOOR]->(f:Floor)-[:HAS_SPACE]->(s:Space)
             RETURN
               b.id AS building_id,
@@ -716,7 +717,11 @@ class AssistantRepository:
                         "building_id": r.get("building_id"),
                     }
 
-        return best_inside or nearest
+        if best_inside is not None:
+            return best_inside
+        if nearest is not None and nearest_d <= max_nearest_distance_m:
+            return nearest
+        return None
 
     def get_main_entrance(self, campus_id: str) -> dict | None:
         return self.get_anchor_space(

@@ -1,14 +1,13 @@
 import os
 import time
 import asyncio
-import functools
+import re
+from pathlib import Path
 from typing import Dict, Any, List, Tuple
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from sentence_transformers import SentenceTransformer
 from repositories.assistant_repo import AssistantRepository
-import re
-from pathlib import Path
 
 # Device configuration
 def _get_device_dtype():
@@ -134,8 +133,81 @@ def _truncate_context(tokenizer: AutoTokenizer, prefix: str, question: str, max_
             break
     return "\n".join(kept), question
 
-# Minumum confidence threshold
-_FIND_PLACE_MIN_SCORE = 0.30
+_FIND_PLACE_HIGH_SCORE = 0.55
+_FIND_PLACE_LOW_SCORE  = 0.15
+
+_FIND_PLACE_STOPWORDS = {
+    "where", "is", "are", "the", "a", "an", "in", "on", "of", "to", "and",
+    "or", "do", "does", "did", "have", "has", "had", "can", "could", "would",
+    "should", "shall", "will", "may", "might", "i", "me", "my", "you", "your",
+    "we", "us", "they", "them", "it", "its", "this", "that", "these", "those",
+    "here", "there", "any", "some", "find", "locate", "located", "look",
+    "looking", "for", "what", "which", "who", "whom", "how", "please",
+    "where's", "tell", "show",
+    # Domain-specific filler:
+    "room", "rooms", "space", "spaces", "building", "buildings", "floor",
+    "floors", "place", "places", "area", "areas",
+}
+
+_FIND_PLACE_SYNONYMS = {
+    "toilet":     ("bathroom", "restroom", "wc", "toilet"),
+    "bathroom":   ("bathroom", "restroom", "wc", "toilet"),
+    "restroom":   ("bathroom", "restroom", "wc", "toilet"),
+    "wc":         ("bathroom", "restroom", "wc", "toilet"),
+    "lift":       ("elevator", "lift"),
+    "elevator":   ("elevator", "lift"),
+    "stairs":     ("stair", "staircase", "stairwell"),
+    "stair":      ("stair", "staircase", "stairwell"),
+    "staircase":  ("stair", "staircase", "stairwell"),
+    "hallway":    ("hallway", "corridor"),
+    "hall":       ("hallway", "corridor"),
+    "corridor":   ("hallway", "corridor"),
+    "cafe":       ("cafe", "cafeteria", "canteen"),
+    "cafeteria":  ("cafe", "cafeteria", "canteen"),
+    "canteen":    ("cafe", "cafeteria", "canteen"),
+    "entrance":   ("entrance", "entry", "lobby"),
+    "entry":      ("entrance", "entry", "lobby"),
+    "lobby":      ("entrance", "entry", "lobby"),
+    "exit":       ("exit", "entrance"),
+    "auditorium": ("auditorium", "aula", "lecture"),
+}
+
+
+def _depluralise(token: str) -> str:
+    """Strip a common English plural suffix so 'wcs' → 'wc', 'toilets' →
+    'toilet', 'rooms' → 'room'. Conservative: only trims when the rest of
+    the token is still at least 2 chars, so we don't eat 'is' down to 'i'."""
+    if len(token) > 3 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("es"):
+        return token[:-2]
+    if len(token) > 2 and token.endswith("s") and not token.endswith("ss"):
+        return token[:-1]
+    return token
+
+
+def _find_place_token_match(query: str, candidate_name: str, candidate_type: str | None) -> bool:
+    """True iff at least one non-stopword query token (or its singular form,
+    or a sanctioned synonym) appears in the candidate space's display name
+    or its space_type. Catches the "where is room 999?" failure mode where
+    the cosine threshold passes but the answer is unrelated to what was asked.
+    """
+    haystack = f"{candidate_name or ''} {candidate_type or ''}".lower()
+    if not haystack.strip():
+        return False
+    tokens = re.findall(r"[a-z0-9][a-z0-9'_-]*", (query or "").lower())
+    content = [t for t in tokens if t not in _FIND_PLACE_STOPWORDS and len(t) >= 2]
+    if not content:
+        # Query was all stopwords — fall back to the cosine score alone.
+        return True
+    for raw in content:
+        for tok in {raw, _depluralise(raw)}:
+            if tok in haystack:
+                return True
+            for needle in _FIND_PLACE_SYNONYMS.get(tok, ()):
+                if needle in haystack:
+                    return True
+    return False
 
 
 def _floor_label(floor_name, floor_index) -> str:
@@ -267,31 +339,56 @@ class AssistantService:
         campus_patterns = [
             r"\b(which|what)\s+campus\s+(am\s+i\s+(in|on)|is\s+this)\b",
             r"\b(in|on)\s+(which|what)\s+campus\s+am\s+i\b",
-            r"\bwhat\s+campus\b.*\bi\b",
+            r"\bwhat\s+campus\s+(am\s+i|i'?m|i\s+am)\b",
         ]
         if any(re.search(p, q) for p in campus_patterns):
             return "campus"
         building_patterns = [
             r"\b(which|what)\s+building\s+(am\s+i\s+(in|on)|is\s+this|am\s+i)\b",
             r"\b(in|on)\s+(which|what)\s+building\s+am\s+i\b",
-            r"\bwhat'?s?\s+(this|the)\s+building\b",
-            r"\bbuilding\b.*\b(am\s+i|i\s+am|i'?m|this|here)\b",
-            r"\b(am\s+i|i\s+am|i'?m|this|here)\b.*\bbuilding\b",
+            r"\bwhat(?:'s|\s+is)\s+(this|the)\s+building(?:\s+called)?\b",
+            r"\bwhat\s+building\s+is\s+this\b",
         ]
         if any(re.search(p, q) for p in building_patterns):
             return "building"
         general_patterns = [
             r"\bwhere\s+am\s+i\b",
             r"\bwhere\s+i\s+am\b",
-            r"\b(what|which)\s+room\s+(am\s+i\s+in|is\s+this)\b",
+            r"\b(what|which)\s+room\s+(am\s+i\s+(in|on)|is\s+this)\b",
             r"\bin\s+(what|which)\s+room\s+am\s+i\b",
             r"\bmy\s+(current\s+)?location\b",
             r"\blocate\s+me\b",
-            r"\bam\s+i\s+in\b",
         ]
         if any(re.search(p, q) for p in general_patterns):
             return "general"
         return None
+
+    def _vertical_intent(self, user_query: str) -> str | None:
+        """Return 'elevator' | 'stairs' | 'any' for questions about vertical
+        transport in this building, else None."""
+        q = user_query.lower()
+        if not re.search(
+            r"\b(is|are)\s+there\b|\bwhere\b|\bhow\s+(do|can)\b|\bdoes\b|\bany\b|\bhave\b",
+            q,
+        ):
+            return None
+        if re.search(r"\b(elevator|lift)s?\b", q):
+            return "elevator"
+        if re.search(r"\b(stairs?|staircase|stairwell|escalator|ramp)\b", q):
+            return "stairs"
+        if re.search(r"\b(go\s+up|go\s+down|upstairs|downstairs|next\s+floor|another\s+floor|other\s+floor)\b", q):
+            return "any"
+        return None
+
+    def _about_building_intent(self, user_query: str) -> bool:
+        """True for "tell me about this building" style questions — answered
+        deterministically with floor count + name. """
+        q = user_query.lower()
+        return bool(
+            re.search(r"\btell\s+me\s+about\s+(this|the)\s+(building|place)\b", q)
+            or re.search(r"\b(describe|info|information|details?)\s+(about|on|for)\s+(this|the)\s+(building|place)\b", q)
+            or re.search(r"\bwhat\s+(is\s+)?(this|the)\s+(building|place)\b", q)
+        )
 
     def _navigation_intent(self, user_query: str) -> bool:
         """True when the user is asking for a route ("how do I get to X",
@@ -404,14 +501,20 @@ class AssistantService:
             return extreme, ["ROOM_OFFICE"]
         if re.search(r"\b(classroom|lecture\s*hall|auditorium)\b", q):
             return extreme, ["ROOM_CLASSROOM", "ROOM_LECTURE_HALL", "AUDITORIUM"]
-        if re.search(r"\b(restroom|toilet|bathroom)\b", q):
+        if re.search(r"\b(restroom|toilet|bathroom|wc)\b", q):
             return extreme, ["RESTROOM", "RESTROOM_ACCESSIBLE"]
-        if re.search(r"\b(cafeteria|canteen)\b", q):
+        if re.search(r"\b(cafeteria|canteen|cafe|coffee)\b", q):
             return extreme, ["CAFETERIA"]
         if re.search(r"\b(library)\b", q):
             return extreme, ["LIBRARY"]
-        if re.search(r"\b(entrance|main\s+entrance)\b", q):
+        if re.search(r"\b(entrance|main\s+entrance|exit)\b", q):
             return extreme, ["ENTRANCE", "ENTRANCE_SECONDARY"]
+        if re.search(r"\b(hallway|corridor|hall)\b", q):
+            return extreme, ["CORRIDOR"]
+        if re.search(r"\b(elevator|lift)s?\b", q):
+            return extreme, ["ELEVATOR"]
+        if re.search(r"\b(stairs?|staircase|stairwell)\b", q):
+            return extreme, ["STAIRCASE", "OUTDOOR_STAIRS"]
 
         return extreme, None
 
@@ -517,6 +620,15 @@ class AssistantService:
 
         effective_building_id = user_building_id or building_id
 
+        def _building_name_for(bid: str | None) -> str:
+            if user_building_name:
+                return user_building_name
+            if bid:
+                floors = self.repo.list_building_floors(campus_id, bid)
+                if floors and floors[0].get("building_name"):
+                    return floors[0]["building_name"]
+            return "this building"
+
         # Building-structure questions ("how many floors?") are answered
         # deterministically from the graph. Checked BEFORE the where-am-i
         # intent, whose "...this building" pattern would otherwise hijack them.
@@ -566,6 +678,67 @@ class AssistantService:
             building = user_building_name or "this building"
             print(f"[chat] which-floor: floor_index={floor_index} label={label!r}", flush=True)
             return {"answer": f"You're on {label} of {building}.", "sources": [label]}
+
+        if self._about_building_intent(user_query) and effective_building_id:
+            floors = self.repo.list_building_floors(campus_id, effective_building_id)
+            bname = (
+                (floors[0].get("building_name") if floors else None)
+                or _building_name_for(effective_building_id)
+            )
+            if floors:
+                n = len(floors)
+                labels = [
+                    (f.get("floor_name") or self._ordinal_floor_label(f.get("floor_index")))
+                    for f in floors
+                ]
+                readable = labels[0] if n == 1 else ", ".join(labels[:-1]) + " and " + labels[-1]
+                ans = (
+                    f"{bname} has {n} floor{'s' if n != 1 else ''}: {readable}."
+                )
+                return {"answer": ans, "sources": [bname]}
+            return {"answer": f"I don't have details for {bname} yet.", "sources": []}
+
+        vintent = self._vertical_intent(user_query)
+        if vintent is not None:
+            if not effective_building_id:
+                return {
+                    "answer": "I'm not sure which building you mean — open it on the map or get closer so I can check.",
+                    "sources": [],
+                }
+            transports = self.repo.vertical_transport_in_building(campus_id, effective_building_id)
+            if vintent == "elevator":
+                wanted_types = {"ELEVATOR"}
+                label = "elevator"
+            elif vintent == "stairs":
+                wanted_types = {"STAIRCASE", "OUTDOOR_STAIRS", "ESCALATOR", "RAMP"}
+                label = "stairs"
+            else:
+                wanted_types = {"ELEVATOR", "STAIRCASE", "OUTDOOR_STAIRS", "ESCALATOR", "RAMP"}
+                label = "elevator or stairs"
+            matching = [t for t in transports if (t.get("type") in wanted_types)]
+            bname = _building_name_for(effective_building_id)
+            if not matching:
+                return {
+                    "answer": f"I don't see any {label} mapped in {bname}.",
+                    "sources": [],
+                }
+            names: list[str] = []
+            seen_lower: set[str] = set()
+            for t in matching:
+                nm = t.get("name")
+                if not nm:
+                    continue
+                key = nm.lower()
+                if key in seen_lower:
+                    continue
+                seen_lower.add(key)
+                names.append(nm)
+            if len(names) == 1:
+                ans = f"Yes — {names[0]} is in {bname}."
+            else:
+                listed = ", ".join(names[:-1]) + " and " + names[-1]
+                ans = f"Yes — {bname} has {listed}."
+            return {"answer": ans, "sources": names[:3]}
 
         loc_intent = self._where_am_i_intent(user_query)
         print(f"[chat] intent: {loc_intent!r}", flush=True)
@@ -660,28 +833,21 @@ class AssistantService:
             spaces = self.repo.search_spaces_on_floor(
                 campus_id, floor_idx, limit=20, building_id=building_id,
             )
-            # No spaces on that floor (or the floor doesn't exist) -> refuse
-            # deterministically. Handing "No spaces found" to the LLM let it
-            # fabricate (e.g. a basement morgue on a non-existent floor).
+            # No spaces on that floor (or the floor doesn't exist) -> refuse.
             if not spaces:
                 print(f"[chat] floor-listing: no spaces on floor {floor_idx} -> refuse", flush=True)
                 return {"answer": "I don't have that information.", "sources": []}
-            floor_label = spaces[0].get("floor_name") or f"floor {floor_idx}"
-            building_label = spaces[0].get("building_name", "the building")
-            context_lines = [
-                f"The following spaces are on {floor_label} (floor index {floor_idx}) in {building_label}:"
-            ]
-            for s in spaces:
-                context_lines.append(f"- {s.get('name', '?')} ({s.get('type', 'space')})")
-            context_text = "\n".join(context_lines)
             similar_spaces = spaces
+            top_in = None
+            in_score = 0.0
         else:
             query_vector = await self._encode_query(user_query)
             radius_m = 200.0 if (user_lat is not None and user_lon is not None) else None
+            top_k = 30 if self._find_place_intent(user_query) else 10
 
             similar_spaces = await asyncio.to_thread(
                 self.repo.search_similar_spaces,
-                campus_id, query_vector, 10, effective_building_id,
+                campus_id, query_vector, top_k, effective_building_id,
                 user_lat, user_lon, radius_m,
             )
 
@@ -740,45 +906,114 @@ class AssistantService:
             )
 
             # "Where is X" / "is there a X" questions are answered
-            # deterministically. A confident match (cosine >= 0.30) is reported
-            # straight from the map data, so the small LLM can't mis-state the
-            # floor. Crucially, when NO match clears the threshold we refuse
-            # here — never handing an empty context to the LLM, which would
-            # otherwise fabricate a plausible room (the hallucination guard).
+            # deterministically. 
             if self._find_place_intent(user_query):
-                if top_in and in_score >= _FIND_PLACE_MIN_SCORE:
-                    floor = _floor_label(top_in.get("floor_name"), top_in.get("floor_index"))
-                    building = top_in.get("building_name") or "the building"
-                    neighbours = [n for n in (top_in.get("connected_to") or []) if n][:3]
+
+                chosen: dict | None = None
+                if top_in is not None and in_score >= _FIND_PLACE_HIGH_SCORE:
+                    chosen = top_in
+                else:
+
+                    for cand in similar_spaces:
+                        if _find_place_token_match(
+                            user_query, cand.get("name"), cand.get("type"),
+                        ):
+                            chosen = cand
+                            break
+
+                if chosen is not None:
+                    floor = _floor_label(chosen.get("floor_name"), chosen.get("floor_index"))
+                    building = chosen.get("building_name") or "the building"
+                    neighbours = [n for n in (chosen.get("connected_to") or []) if n][:3]
                     near = f", near {', '.join(neighbours)}" if neighbours else ""
-                    name = top_in.get("name") or "It"
-                    print(f"[chat] find-place: {name!r} floor_idx={top_in.get('floor_index')}", flush=True)
+                    name = chosen.get("name") or "It"
+                    sc = float(chosen.get("score") or 0.0)
+                    print(
+                        f"[chat] find-place: {name!r} score={sc:.3f} "
+                        f"top_was={(top_in or {}).get('name')!r}",
+                        flush=True,
+                    )
                     return {
                         "answer": f"{name} is on {floor} of {building}{near}.",
                         "sources": [name],
                     }
                 print(
-                    f"[chat] find-place: no confident match "
-                    f"(top_score={in_score:.3f} < {_FIND_PLACE_MIN_SCORE}) -> refuse",
+                    f"[chat] find-place: refuse "
+                    f"(top_score={in_score:.3f} high={_FIND_PLACE_HIGH_SCORE} "
+                    f"low={_FIND_PLACE_LOW_SCORE} top_name={(top_in or {}).get('name')!r})",
                     flush=True,
                 )
                 return {"answer": "I don't have that information.", "sources": []}
 
-            context_lines = []
-            for s in similar_spaces:
-                floor = _floor_label(s.get("floor_name"), s.get("floor_index"))
-                building = s.get("building_name") or "the building"
-                location = f"on {floor} of {building}"
-                # connected_to is now a list of real neighbour names (doors and
-                # other connectors are filtered out and hopped through upstream).
-                neighbours = [n for n in (s.get("connected_to") or []) if n]
-                if neighbours:
-                    near = ", ".join(neighbours[:5])
-                    graph_context = f", near {near}"
-                else:
-                    graph_context = ""
-                context_lines.append(f"- {s.get('name','?')} is {location}{graph_context}.")
-            context_text = "\n".join(context_lines)
+
+        if floor_idx is not None and not nav:
+            floor_label_str = (
+                (similar_spaces[0].get("floor_name") if similar_spaces else None)
+                or self._ordinal_floor_label(floor_idx)
+            )
+            building_label = (
+                (similar_spaces[0].get("building_name") if similar_spaces else None)
+                or _building_name_for(effective_building_id)
+            )
+
+            hidden_types = {
+                "DOOR_STANDARD", "DOOR_AUTOMATIC", "DOOR_LOCKED",
+                "DOOR_EMERGENCY", "PASSAGE", "CONNECTOR",
+            }
+            visible = [
+                s for s in similar_spaces
+                if (s.get("type") or "") not in hidden_types and s.get("name")
+            ]
+            names = []
+            for s in visible:
+                nm = s.get("name")
+                if nm and nm not in names:
+                    names.append(nm)
+            if not names:
+                return {"answer": "I don't have that information.", "sources": []}
+            shown = names[:8]
+            extra = len(names) - len(shown)
+            listed = ", ".join(shown[:-1]) + (
+                f" and {shown[-1]}" if len(shown) > 1 else shown[0]
+            )
+            extra_phrase = f" (and {extra} more)" if extra > 0 else ""
+            return {
+                "answer": f"{floor_label_str} of {building_label} has {listed}{extra_phrase}.",
+                "sources": shown[:5],
+            }
+
+
+        mode = (os.getenv("ASSISTANT_MODE") or "offline").strip().lower()
+        use_llm = mode == "online" and bool(similar_spaces)
+        if not use_llm:
+            print(
+                f"[chat] no deterministic intent matched -> refuse "
+                f"(top_score={in_score:.3f}, mode={mode})",
+                flush=True,
+            )
+            return {
+                "answer": (
+                    "I can answer questions about rooms, floors, navigation, "
+                    "and where things are in a building. Try \"where is the "
+                    "library?\", \"how many floors are here?\", or \"is there "
+                    "an elevator?\"."
+                ),
+                "sources": [],
+            }
+
+        context_lines = []
+        for s in similar_spaces:
+            floor = _floor_label(s.get("floor_name"), s.get("floor_index"))
+            building = s.get("building_name") or "the building"
+            location = f"on {floor} of {building}"
+            neighbours = [n for n in (s.get("connected_to") or []) if n]
+            if neighbours:
+                near = ", ".join(neighbours[:5])
+                graph_context = f", near {near}"
+            else:
+                graph_context = ""
+            context_lines.append(f"- {s.get('name','?')} is {location}{graph_context}.")
+        context_text = "\n".join(context_lines)
 
         prompt_path = Path(__file__).resolve().parents[1] / "core" / "prompt" / "prompt.txt"
         system_prompt = prompt_path.read_text(encoding="utf-8")
@@ -793,12 +1028,10 @@ class AssistantService:
 
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{context_text}\n\n{user_query_trim}"}
+            {"role": "user", "content": f"{context_text}\n\n{user_query_trim}"},
         ]
-
         response = await asyncio.to_thread(_generate_sync, messages)
-
         return {
             "answer": response,
-            "sources": [s.get('name', '?') for s in similar_spaces]
+            "sources": [s.get("name", "?") for s in similar_spaces],
         }

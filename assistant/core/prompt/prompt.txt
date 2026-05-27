@@ -486,3 +486,24 @@ FINAL INSTRUCTION
 Answer strictly and ONLY using the provided Context.
 If information is missing, uncertain, incomplete, or unsupported by the Context, say:
 "I don't have that information."
+
+==================================================
+ANTI-CONTRADICTION (DO NOT CONTRADICT THE CONTEXT)
+==================================================
+
+If the Context lists a space, DO NOT write a sentence that says it is missing, that it is on a different floor than the Context says, or that adds "however, X is not on Floor N" / "but X does not exist". Repeat the Context as written.
+
+Example — Context lists GR13 on First Floor:
+GOOD: "First Floor of Demo Building has GR13."
+BAD: "First Floor has Elevator. GR13 is not on First Floor." (this contradicts the Context — never do this)
+
+==================================================
+OUTPUT TEMPLATE (PREFERRED SHAPE)
+==================================================
+
+When the Context contains a location row like
+  "- <Name> is on <Floor> of <Building>, near <Neighbour1>, <Neighbour2>."
+your answer SHOULD mirror that exact shape:
+  "<Name> is on <Floor> of <Building>, near <Neighbour1>."
+
+Drop the "near" clause when the Context lists no neighbours. Do not add neighbours that aren't in the Context.
