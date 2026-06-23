@@ -140,6 +140,7 @@ class AssistantRepository:
 
         sql = text(f"""
             SELECT
+                bs.id                                  AS id,
                 bs.display_name                        AS name,
                 bs.space_type                          AS type,
                 f.display_name                         AS floor_name,
@@ -208,6 +209,7 @@ class AssistantRepository:
                 except (ValueError, TypeError):
                     conns = []
             results.append({
+                "id": r["id"],
                 "name": r["name"],
                 "type": r["type"],
                 "floor_name": r["floor_name"],
@@ -245,6 +247,7 @@ class AssistantRepository:
           ]
 
         RETURN
+            space.id AS id,
             space.display_name AS name,
             space.space_type AS type,
             floor.display_name AS floor_name,
@@ -269,6 +272,7 @@ class AssistantRepository:
         for record in records:
             connections = [c for c in record["connected_to"] if c]
             results.append({
+                "id": record["id"],
                 "name": record["name"],
                 "type": record["type"],
                 "floor_name": record["floor_name"],
@@ -640,6 +644,8 @@ class AssistantRepository:
               f.origin_lng AS f_lng,
               f.origin_bearing AS f_bearing,
               f.scale_factor AS f_scale,
+              f.floor_index AS floor_index,
+              s.id AS space_id,
               s.display_name AS name,
               s.centroid_x AS cx,
               s.centroid_y AS cy,
@@ -679,7 +685,9 @@ class AssistantRepository:
                     "inside": False,
                     "distance_m": d,
                     "name": r["name"],
+                    "space_id": r.get("space_id"),
                     "floor_name": r["floor_name"],
+                    "floor_index": r.get("floor_index"),
                     "building_name": r["building_name"],
                     "building_id": r.get("building_id"),
                 }
@@ -712,7 +720,9 @@ class AssistantRepository:
                         "inside": True,
                         "distance_m": d,
                         "name": r["name"],
+                        "space_id": r.get("space_id"),
                         "floor_name": r["floor_name"],
+                        "floor_index": r.get("floor_index"),
                         "building_name": r["building_name"],
                         "building_id": r.get("building_id"),
                     }
@@ -722,6 +732,75 @@ class AssistantRepository:
         if nearest is not None and nearest_d <= max_nearest_distance_m:
             return nearest
         return None
+
+    def route_between(
+        self,
+        campus_id: str,
+        from_space_id: str,
+        to_space_id: str,
+        max_hops: int = 60,
+    ) -> list[dict]:
+        """Ordered nodes of the shortest connector path between two spaces,
+        for turn-by-turn directions. Uses native Cypher ``shortestPath`` so it
+        works without the GDS plugin. Campus-scoped (cross-tenant safe)."""
+        try:
+            hops = max(1, min(int(max_hops), 120))
+        except (TypeError, ValueError):
+            hops = 60
+        rows = self.db.execute(
+            """
+            MATCH (a:Space {id: $from_id, campus_id: $campus_id}),
+                  (b:Space {id: $to_id,   campus_id: $campus_id})
+            MATCH p = shortestPath((a)-[:CONNECTS_TO*..%d]-(b))
+            RETURN [n IN nodes(p) | {
+                name: n.display_name,
+                type: n.space_type,
+                floor_index: n.floor_index,
+                cx: n.centroid_x,
+                cy: n.centroid_y
+            }] AS steps
+            """ % hops,
+            {"from_id": from_space_id, "to_id": to_space_id, "campus_id": campus_id},
+        )
+        if not rows:
+            return []
+        steps = rows[0].get("steps") or []
+        return [dict(s) for s in steps]
+
+    def get_space_location(self, campus_id: str, space_id: str) -> dict | None:
+        """Resolve a known space id to a location dict shaped like
+        ``locate_user``'s output. Used when the client has a forced / landmark
+        snap (the red dot) so "where am I" reports that exact room, not GPS."""
+        # Match the space first; the building/floor path is OPTIONAL so a space
+        # that isn't on a clean HAS_FLOOR->HAS_SPACE chain still resolves (we
+        # still report it as "inside" — it's a deliberate snap to a known space).
+        cypher = """
+            MATCH (s:Space {id: $space_id})
+            WHERE $campus_id IS NULL OR s.campus_id = $campus_id
+            OPTIONAL MATCH (b:Building)-[:HAS_FLOOR]->(f:Floor)-[:HAS_SPACE]->(s)
+            RETURN s.id AS space_id, s.display_name AS name,
+                   f.display_name AS floor_name, f.floor_index AS floor_index,
+                   b.id AS building_id, b.name AS building_name
+            LIMIT 1
+        """
+        rows = self.db.execute(cypher, {"campus_id": campus_id, "space_id": space_id})
+        if not rows:
+            # The id is unique; if a campus mismatch hid it, resolve by id alone
+            # so a genuine snap is never silently downgraded to a GPS guess.
+            rows = self.db.execute(cypher, {"campus_id": None, "space_id": space_id})
+        if not rows:
+            return None
+        r = rows[0]
+        return {
+            "inside": True,
+            "distance_m": 0.0,
+            "space_id": r.get("space_id"),
+            "name": r.get("name"),
+            "floor_name": r.get("floor_name"),
+            "floor_index": r.get("floor_index"),
+            "building_id": r.get("building_id"),
+            "building_name": r.get("building_name"),
+        }
 
     def get_main_entrance(self, campus_id: str) -> dict | None:
         return self.get_anchor_space(

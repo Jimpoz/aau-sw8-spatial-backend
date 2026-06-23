@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import re
+import math
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 import torch
@@ -396,15 +397,52 @@ class AssistantService:
         ("what's on floor 1")."""
         q = user_query.lower()
         patterns = [
-            r"\bhow\s+(do|can|would)\s+i\s+(get|go|reach|find|walk|navigate)\b",
-            r"\bhow\s+to\s+(get|go|reach|find|walk|navigate)\b",
-            r"\b(directions?|route|way)\s+to\b",
-            r"\b(take|bring|guide|lead)\s+me\s+to\b",
-            r"\b(get|go|navigate)\s+to\s+the\b",
-            r"\breach\s+the\b",
-            r"\bfind\s+my\s+way\b",
+            r"\bhow\s+(do|can|could|would|should)\s+i\s+(get|go|reach|find|walk|navigate|head|travel)\b",
+            r"\bhow\s+to\s+(get|go|reach|find|walk|navigate|head|travel)\b",
+            r"\b(directions?|route|way|path)\s+(to|towards?|for)\b",
+            r"\b(take|bring|guide|lead|point|show|send)\s+me\s+to\b",
+            r"\b(get|go|navigate|head|walk|move)\s+to\b",
+            r"\bnavigate\s+(me\s+)?to\b",
+            r"\breach\s+(the|a|an|my)\b",
+            r"\bfind\s+(my|the)\s+way\b",
+            r"\bi\s+(want|need|'?d\s+like|would\s+like)\s+to\s+(get|go|reach|navigate|head)\b",
+            r"\b(which|what)\s+way\s+(to|is)\b",
+            r"\bwhere\s+do\s+i\s+go\b",
         ]
         return any(re.search(p, q) for p in patterns)
+
+    # Lead-in phrases stripped to leave just the destination ("GR5", "cafeteria").
+    _NAV_LEADS = [
+        "how do i get to", "how do i go to", "how do i reach", "how do i navigate to",
+        "how do i find my way to", "how can i get to", "how can i reach",
+        "how to get to", "how to go to", "how to reach", "how to navigate to",
+        "i want to go to", "i want to get to", "i need to go to", "i need to get to",
+        "i'd like to go to", "i would like to go to", "where do i go to",
+        "show me the way to", "find my way to", "the way to", "way to",
+        "navigate me to", "navigate to", "directions to", "direction to",
+        "route to", "path to", "take me to", "bring me to", "guide me to",
+        "lead me to", "point me to", "show me to", "send me to",
+        "get to", "go to", "head to", "walk to", "reach",
+    ]
+
+    def _destination_text(self, query: str) -> str:
+        """Strip the navigation lead-in so we resolve just the *destination*
+        ("how do I get to the cafeteria" -> "cafeteria"). Falls back to the
+        whole query if nothing strips."""
+        q = (query or "").strip().rstrip("?.! ").strip()
+        low = q.lower()
+        for p in sorted(self._NAV_LEADS, key=len, reverse=True):
+            if low == p:
+                return query
+            if low.startswith(p + " "):
+                q = q[len(p):].strip()
+                low = q.lower()
+                break
+        for art in ("the ", "a ", "an ", "to "):
+            if low.startswith(art):
+                q = q[len(art):].strip()
+                break
+        return q or query
 
     def _floor_intent(self, user_query: str) -> int | None:
         """
@@ -582,6 +620,155 @@ class AssistantService:
             sources = [current_space] + sources
         return {"answer": answer, "sources": sources}
 
+    @staticmethod
+    def _turn_hint(a: dict, b: dict, c: dict) -> str | None:
+        """Approximate left/right turn at node ``b`` for the path a→b→c, from
+        local floor-plan centroids. Only meaningful when all three share a
+        floor and have coordinates."""
+        if (a.get("floor_index") != b.get("floor_index")
+                or b.get("floor_index") != c.get("floor_index")):
+            return None
+        try:
+            ax, ay = float(a["cx"]), float(a["cy"])
+            bx, by = float(b["cx"]), float(b["cy"])
+            cx, cy = float(c["cx"]), float(c["cy"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        v1x, v1y = bx - ax, by - ay
+        v2x, v2y = cx - bx, cy - by
+        cross = v1x * v2y - v1y * v2x
+        dot = v1x * v2x + v1y * v2y
+        ang = math.degrees(math.atan2(cross, dot))
+        if ang > 35:
+            return "turn left"
+        if ang < -35:
+            return "turn right"
+        return None
+
+    def _render_directions(
+        self, steps: list[dict], origin_name: str | None, dest_name: str
+    ) -> str:
+        """Turn the ordered path nodes into spoken-style directions that
+        follow the route — the same node sequence the polyline draws."""
+        pieces: list[str] = []
+        n = len(steps)
+        for i in range(1, n):
+            cur = steps[i]
+            ty = (cur.get("type") or "").upper()
+            name = cur.get("name") or ""
+            fidx = cur.get("floor_index")
+            turn = self._turn_hint(steps[i - 1], cur, steps[i + 1]) if i < n - 1 else None
+
+            if ty.startswith("DOOR_"):
+                seg = "go through the door"
+            elif ty == "PASSAGE":
+                seg = "continue through"
+            elif ty == "STAIRCASE":
+                seg = (f"take the stairs to {self._ordinal_floor_label(fidx)}"
+                       if fidx is not None else "take the stairs")
+            elif ty == "ELEVATOR":
+                seg = (f"take the elevator to {self._ordinal_floor_label(fidx)}"
+                       if fidx is not None else "take the elevator")
+            elif ty == "ESCALATOR":
+                seg = "take the escalator"
+            elif ty == "RAMP":
+                seg = "take the ramp"
+            elif ty in ("CORRIDOR", "CORRIDOR_SEGMENT"):
+                seg = f"continue along {name}" if name else "continue along the corridor"
+            elif ty == "LOBBY":
+                seg = f"cross {name}" if name else "cross the lobby"
+            elif i == n - 1:
+                seg = f"arrive at {name or dest_name}"
+            else:
+                seg = f"pass {name}" if name else None
+
+            if not seg:
+                continue
+            if turn and ty in ("CORRIDOR", "CORRIDOR_SEGMENT"):
+                seg = f"{turn}, then {seg}"
+            elif turn and ty.startswith("DOOR_"):
+                seg = f"{turn} and {seg}"
+            pieces.append(seg)
+
+        if not pieces or not pieces[-1].startswith("arrive"):
+            pieces.append(f"arrive at {dest_name}")
+        if len(pieces) > 8:  # keep the answer readable
+            pieces = pieces[:7] + [pieces[-1]]
+        start = f"From {origin_name}, " if origin_name else "From your current spot, "
+        return start + "; ".join(pieces) + "."
+
+    async def _directions_answer(
+        self,
+        *,
+        user_query: str,
+        campus_id: str,
+        building_id: str | None,
+        loc: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        """Answer "how do I get to X" for a place (not a floor): resolve the
+        destination space, then give route-following directions when we know
+        where the user is, otherwise say where it is."""
+        # Resolve the *destination*: strip the "how do I get to…" lead-in so we
+        # embed/match just the place name, and DON'T GPS-radius-filter it — the
+        # destination can be anywhere in the building, not near the user.
+        dest_q = self._destination_text(user_query)
+        query_vector = await self._encode_query(dest_q)
+
+        def _resolve(bid: str | None) -> dict | None:
+            sims = self.repo.search_similar_spaces(
+                campus_id, query_vector, 30, bid, None, None, None,
+            )
+            top = sims[0] if sims else None
+            if top is not None and (top.get("score") or 0.0) >= _FIND_PLACE_HIGH_SCORE:
+                return top
+            for cand in sims:
+                if _find_place_token_match(dest_q, cand.get("name"), cand.get("type")):
+                    return cand
+            return None
+
+        chosen = await asyncio.to_thread(_resolve, building_id)
+        if chosen is None and building_id is not None:
+            chosen = await asyncio.to_thread(_resolve, None)  # widen to whole campus
+
+        if chosen is None:
+            return {
+                "answer": (
+                    f"I couldn't find \"{dest_q}\" on this campus. "
+                    f"Try the room name or number — e.g. \"how do I get to GR5?\""
+                ),
+                "sources": [],
+            }
+
+        dest_name = chosen.get("name") or "your destination"
+        floor = _floor_label(chosen.get("floor_name"), chosen.get("floor_index"))
+        building = chosen.get("building_name") or "the building"
+        neighbours = [n for n in (chosen.get("connected_to") or []) if n][:2]
+        near = f", near {', '.join(neighbours)}" if neighbours else ""
+
+        origin_id = loc.get("space_id") if loc else None
+        dest_id = chosen.get("id")
+
+        if origin_id and dest_id and origin_id != dest_id:
+            steps = await asyncio.to_thread(
+                self.repo.route_between, campus_id, origin_id, dest_id,
+            )
+            if steps and len(steps) >= 2:
+                directions = self._render_directions(
+                    steps, loc.get("name") if loc else None, dest_name,
+                )
+                print(f"[chat] directions: {len(steps)} steps to {dest_name!r}", flush=True)
+                return {"answer": directions, "sources": [dest_name]}
+
+        # No usable origin / no path: say where it is + how to get a live route.
+        print(f"[chat] directions: no route (origin={origin_id!r}) -> location hint", flush=True)
+        return {
+            "answer": (
+                f"{dest_name} is on {floor} of {building}{near}. "
+                f"Open it on the map and tap Navigate for a step-by-step route."
+            ),
+            "sources": [dest_name],
+        }
+
     async def chat(
         self,
         user_query: str,
@@ -590,6 +777,7 @@ class AssistantService:
         user_lat: float | None = None,
         user_lon: float | None = None,
         floor_index: int | None = None,
+        current_location_space_id: str | None = None,
     ) -> Dict[str, Any]:
         t0 = time.perf_counter()
 
@@ -604,8 +792,13 @@ class AssistantService:
             print("[chat] smalltalk → canned reply", flush=True)
             return {"answer": smalltalk, "sources": []}
 
+        # Prefer a forced / landmark snap (the red dot) over GPS. Indoors GPS
+        # drifts, so when the client has snapped the user to a space, "where am
+        # I" must report that room — not whatever GPS is nearest.
         loc = None
-        if user_lat is not None and user_lon is not None:
+        if current_location_space_id:
+            loc = self.repo.get_space_location(campus_id, current_location_space_id)
+        if loc is None and user_lat is not None and user_lon is not None:
             loc = self.repo.locate_user(campus_id, user_lat, user_lon)
         user_building_id = loc.get("building_id") if loc else None
         user_building_name = loc.get("building_name") if loc else None
@@ -743,14 +936,11 @@ class AssistantService:
         loc_intent = self._where_am_i_intent(user_query)
         print(f"[chat] intent: {loc_intent!r}", flush=True)
         if loc_intent is not None:
-            if user_lat is None or user_lon is None:
-                return {
-                    "answer": "I don't have your location yet — please make sure location is enabled in the app.",
-                    "sources": [],
-                }
+            # A forced/landmark snap gives us `loc` even without GPS, so gate on
+            # `loc` (not on GPS) — otherwise we'd reject a known red-dot position.
             if not loc:
                 return {
-                    "answer": "I can't see any rooms near you on this campus.",
+                    "answer": "I don't have your location yet — enable location, or point your camera at a landmark to set it.",
                     "sources": [],
                 }
             building = loc.get("building_name") or "the building"
@@ -827,6 +1017,17 @@ class AssistantService:
                 building_id=effective_building_id,
                 target_floor=floor_idx,
                 current_space=(loc.get("name") if loc else None),
+            )
+
+        # "How do I get to <place>?" — resolve the destination and give
+        # route-following directions (instead of the generic fallback).
+        if nav:
+            print("[chat] navigation intent -> directions", flush=True)
+            return await self._directions_answer(
+                user_query=user_query,
+                campus_id=campus_id,
+                building_id=effective_building_id,
+                loc=loc,
             )
 
         if floor_idx is not None and not nav:

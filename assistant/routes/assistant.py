@@ -20,5 +20,6 @@ async def chat_endpoint(
         user_lat=request.user_lat,
         user_lon=request.user_lon,
         floor_index=request.floor_index,
+        current_location_space_id=request.current_location_space_id,
     )
     return result

@@ -8,6 +8,9 @@ class ChatRequest(BaseModel):
     user_lat: float | None = None
     user_lon: float | None = None
     floor_index: int | None = None
+    # The forced/landmark snap (the red dot). When set it overrides GPS for
+    # locating the user, so "where am I" reports the room the dot is in.
+    current_location_space_id: str | None = None
 
 class ChatResponse(BaseModel):
     answer: str
